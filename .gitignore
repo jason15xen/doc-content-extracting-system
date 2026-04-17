@@ -45,6 +45,11 @@ tests/fixtures/
 .DS_Store
 Thumbs.db
 
+# Docker image exports (large binary artifacts; rebuild with `docker build` instead)
+docker-image/
+*.tar
+*.tar.gz
+
 # Type checkers
 .mypy_cache/
 .ruff_cache/
