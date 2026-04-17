@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-docx
+openpyxl
+python-pptx
+PyMuPDF
+pymupdf4llm
