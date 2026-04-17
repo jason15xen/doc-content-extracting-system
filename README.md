@@ -47,7 +47,7 @@ Each extractor internally builds a list of structured elements in reading order;
 
 ```bash
 docker build -t doc-extract .
-docker run --rm -p 8000:8000 doc-extract
+docker run --rm -p 8889:8889 doc-extract
 ```
 
 ### Local
@@ -57,7 +57,7 @@ You need Python 3.10+ and, if you want to handle `.doc/.xls/.ppt`, LibreOffice i
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8889
 ```
 
 ## Endpoints
@@ -81,7 +81,7 @@ Returns the list of accepted extensions.
 Upload one file as `multipart/form-data` under field `file`. Response is JSON.
 
 ```bash
-curl -F 'file=@/path/to/report.xlsx' http://localhost:8000/extract
+curl -F 'file=@/path/to/report.xlsx' http://localhost:8889/extract
 ```
 
 **Status codes:**

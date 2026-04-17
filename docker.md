@@ -5,7 +5,7 @@ How to build, load, run, and use the `doc-extract` Docker image.
 ## Prerequisites
 
 - Docker installed ([get Docker](https://docs.docker.com/get-docker/))
-- Port **8000** free on the host
+- Port **8889** free on the host
 
 ## Two ways to get the image
 
@@ -35,22 +35,24 @@ Loaded image: doc-extract:latest
 
 ## Run the container
 
+The container listens on **port 8889** internally (set in the Dockerfile's `CMD`).
+
 Foreground (stops when you Ctrl-C):
 
 ```bash
-docker run --rm -p 8000:8000 doc-extract:latest
+docker run --rm -p 8889:8889 doc-extract:latest
 ```
 
 Background (detached) with a name so you can manage it:
 
 ```bash
-docker run -d --rm --name doc-extract -p 8000:8000 doc-extract:latest
+docker run -d --rm --name doc-extract -p 8889:8889 doc-extract:latest
 ```
 
 Verify it's up:
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8889/health
 # → {"status":"ok"}
 ```
 
@@ -59,7 +61,7 @@ curl http://localhost:8000/health
 ### Extract a document
 
 ```bash
-curl -F 'file=@/path/to/your/report.xlsx' http://localhost:8000/extract
+curl -F 'file=@/path/to/your/report.xlsx' http://localhost:8889/extract
 ```
 
 Response:
@@ -77,13 +79,13 @@ Works for any supported extension: `.docx`, `.xlsx`, `.pptx`, `.docm`, `.xlsm`, 
 ### Check supported formats
 
 ```bash
-curl http://localhost:8000/supported
+curl http://localhost:8889/supported
 ```
 
 ### Health check
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8889/health
 ```
 
 ## Stop / remove
@@ -113,14 +115,14 @@ docker history doc-extract:latest
 
 ## Change the host port
 
-Default runs on host port 8000. To use, say, 9000:
+Default runs on host port 8889. To use, say, 9000:
 
 ```bash
-docker run --rm -p 9000:8000 doc-extract:latest
+docker run --rm -p 9000:8889 doc-extract:latest
 # → now curl http://localhost:9000/extract
 ```
 
-The container always listens on **8000** internally; only the left side of `-p HOST:CONTAINER` changes.
+The container listens on **8889** internally (set in the Dockerfile's `CMD`); only the left side of `-p HOST:CONTAINER` freely changes. The right side must stay `8889` unless you also change the Dockerfile and rebuild.
 
 ## Re-export the image (after rebuilding)
 
@@ -148,7 +150,7 @@ LibreOffice is the bulk of the image. If you never need `.doc/.xls/.ppt` support
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `address already in use` on port 8000 | Something else is using it | `docker run -p 9000:8000 ...` or stop the other process |
+| `address already in use` on port 8889 | Something else is using it | `docker run -p 9000:8889 ...` or stop the other process |
 | `soffice failed: ...` when uploading `.doc/.xls/.ppt` | Corrupt or password-protected file | Confirm the file opens in LibreOffice / MS Office first |
 | `413 File exceeds 100 MB limit` | File larger than `MAX_UPLOAD_MB` | Edit [app/config.py](app/config.py), rebuild the image |
 | Build fails on `apt-get install libreoffice-*` | Network / mirror issue | Retry; or pin a specific Debian mirror in the Dockerfile |
