@@ -18,7 +18,11 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
+COPY scripts ./scripts
+RUN mkdir -p /srv/storage/uploads && chmod +x /srv/scripts/entrypoint.sh
 
 EXPOSE 8889
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8889"]
+ENTRYPOINT ["/srv/scripts/entrypoint.sh"]

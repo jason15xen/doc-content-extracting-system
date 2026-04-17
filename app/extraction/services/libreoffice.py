@@ -4,8 +4,8 @@ import shutil
 import subprocess
 import tempfile
 
-from app.config import LIBREOFFICE_TIMEOUT_SEC
 from app.errors import ConversionError
+from app.extraction.config import LIBREOFFICE_TIMEOUT_SEC
 
 
 def soffice_available() -> bool:

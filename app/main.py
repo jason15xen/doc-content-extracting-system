@@ -1,83 +1,76 @@
 import asyncio
-import os
-import tempfile
-from typing import Any
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.concurrency import run_in_threadpool
+from fastapi import FastAPI
 
-from app.config import MAX_UPLOAD_MB, SUPPORTED_EXTENSIONS
-from app.dispatcher import get_extractor
-from app.errors import ConversionError, ExtractionError, UnsupportedFormatError
-from app.schemas import ExtractionResponse
-
-app = FastAPI(title="Document Content Extraction API")
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+from app.db.session import build_engine, build_sessionmaker
+from app.pipeline import context as pipeline_context
+from app.pipeline.context import PipelineContext
+from app.repositories import tasks as tasks_repo
+from app.routers import admin, datasets, documents, extract, health, search, tasks
+from app.services.chat import Chatter
+from app.services.embeddings import Embedder
+from app.services.search_index import SearchGateway
+from app.settings import get_settings
 
 
-@app.get("/supported")
-def supported() -> dict[str, list[str]]:
-    return {"extensions": sorted(SUPPORTED_EXTENSIONS)}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 
+    engine = build_engine(settings)
+    sessionmaker = build_sessionmaker(engine)
 
-@app.post(
-    "/extract",
-    response_model=list[ExtractionResponse],
-    response_model_exclude_none=True,
-)
-async def extract(files: list[UploadFile] = File(...)) -> list[ExtractionResponse]:
-    if not files:
-        raise HTTPException(status_code=422, detail="No files provided")
+    search_gw = SearchGateway(settings)
+    embedder = Embedder(settings)
+    chatter = Chatter(settings)
 
-    results = await asyncio.gather(*(_process_one(f) for f in files))
-    return [ExtractionResponse(**r) for r in results]
+    if settings.ensure_index_on_startup and settings.azure_search_endpoint:
+        try:
+            await search_gw.ensure_index()
+        except Exception:
+            # Surface through logs at container level; do not block startup for dev.
+            pass
 
+    ctx = PipelineContext(
+        settings=settings,
+        sessionmaker=sessionmaker,
+        embedder=embedder,
+        chatter=chatter,
+        search=search_gw,
+        ingest_semaphore=asyncio.Semaphore(settings.ingest_concurrency),
+    )
+    pipeline_context.set_context(ctx)
 
-async def _process_one(upload: UploadFile) -> dict[str, Any]:
-    """Extract a single upload. Never raises — returns either a success dict
-    {filename, file_type, plain_text} or an error dict {filename, error} so
-    that one bad file in a batch doesn't sink the rest."""
-    filename = upload.filename or ""
-    ext = os.path.splitext(filename)[1].lower()
+    app.state.settings = settings
+    app.state.pipeline = ctx
 
-    if ext not in SUPPORTED_EXTENSIONS:
-        return {
-            "filename": filename,
-            "error": f"Unsupported file extension: {ext or '(none)'}",
-        }
-
-    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
-    tmp_path: str | None = None
+    # Reconcile any `running` tasks left over from a prior crash. Tolerant of
+    # unreachable database at startup (e.g. during tests with DI overrides).
     try:
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            tmp_path = tmp.name
-            total = 0
-            while chunk := await upload.read(1024 * 1024):
-                total += len(chunk)
-                if total > max_bytes:
-                    return {
-                        "filename": filename,
-                        "error": f"File exceeds {MAX_UPLOAD_MB} MB limit",
-                    }
-                tmp.write(chunk)
+        async with sessionmaker() as session:
+            await tasks_repo.reconcile_running_tasks(session)
+            await session.commit()
+    except Exception:
+        pass
 
-        extractor = get_extractor(ext)
-        return await run_in_threadpool(extractor.extract, tmp_path, filename)
-    except UnsupportedFormatError as exc:
-        return {"filename": filename, "error": str(exc)}
-    except ConversionError as exc:
-        return {"filename": filename, "error": f"Conversion failed: {exc}"}
-    except ExtractionError as exc:
-        return {"filename": filename, "error": f"Extraction failed: {exc}"}
-    except Exception as exc:
-        return {"filename": filename, "error": f"Extraction failed: {exc}"}
+    try:
+        yield
     finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        await search_gw.aclose()
+        await embedder.aclose()
+        await chatter.aclose()
+        await engine.dispose()
+        pipeline_context.clear_context()
+
+
+app = FastAPI(title="RAG Ingestion & Search API", lifespan=lifespan)
+
+app.include_router(health.router)
+app.include_router(extract.router)
+app.include_router(datasets.router)
+app.include_router(documents.router)
+app.include_router(tasks.router)
+app.include_router(search.router)
+app.include_router(admin.router)

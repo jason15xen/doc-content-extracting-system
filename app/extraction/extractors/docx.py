@@ -5,7 +5,7 @@ from docx.oxml.ns import qn
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
-from app.extractors.base import Extractor
+from app.extraction.extractors.base import Extractor
 
 
 class DocxExtractor(Extractor):

@@ -1,6 +1,6 @@
 from typing import Any
 
-from app.extractors.base import Extractor
+from app.extraction.extractors.base import Extractor
 
 # Strict encodings tried in order; latin-1 is the unconditional catch-all
 # because it decodes any byte sequence.

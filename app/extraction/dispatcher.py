@@ -1,12 +1,12 @@
-from app.config import LEGACY_EXTS, SUPPORTED_EXTENSIONS
 from app.errors import UnsupportedFormatError
-from app.extractors.base import Extractor
-from app.extractors.docx import DocxExtractor
-from app.extractors.legacy import LegacyExtractor
-from app.extractors.pdf import PdfExtractor
-from app.extractors.pptx import PptxExtractor
-from app.extractors.text import TextExtractor
-from app.extractors.xlsx import XlsxExtractor
+from app.extraction.config import LEGACY_EXTS, SUPPORTED_EXTENSIONS
+from app.extraction.extractors.base import Extractor
+from app.extraction.extractors.docx import DocxExtractor
+from app.extraction.extractors.legacy import LegacyExtractor
+from app.extraction.extractors.pdf import PdfExtractor
+from app.extraction.extractors.pptx import PptxExtractor
+from app.extraction.extractors.text import TextExtractor
+from app.extraction.extractors.xlsx import XlsxExtractor
 
 
 def get_extractor(ext: str) -> Extractor:

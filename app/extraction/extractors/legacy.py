@@ -2,11 +2,11 @@ import os
 import shutil
 from typing import Any
 
-from app.extractors.base import Extractor
-from app.extractors.docx import DocxExtractor
-from app.extractors.pptx import PptxExtractor
-from app.extractors.xlsx import XlsxExtractor
-from app.services import libreoffice
+from app.extraction.extractors.base import Extractor
+from app.extraction.extractors.docx import DocxExtractor
+from app.extraction.extractors.pptx import PptxExtractor
+from app.extraction.extractors.xlsx import XlsxExtractor
+from app.extraction.services import libreoffice
 
 LEGACY_TARGET = {
     ".doc": ("docx", DocxExtractor()),

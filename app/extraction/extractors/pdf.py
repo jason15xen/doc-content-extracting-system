@@ -2,7 +2,7 @@ from typing import Any
 
 import pymupdf4llm
 
-from app.extractors.base import Extractor
+from app.extraction.extractors.base import Extractor
 
 
 class PdfExtractor(Extractor):

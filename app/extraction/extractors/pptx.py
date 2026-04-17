@@ -3,7 +3,7 @@ from typing import Any
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from app.extractors.base import Extractor
+from app.extraction.extractors.base import Extractor
 
 
 class PptxExtractor(Extractor):

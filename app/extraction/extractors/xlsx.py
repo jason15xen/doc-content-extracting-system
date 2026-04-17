@@ -2,7 +2,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from app.extractors.base import Extractor
+from app.extraction.extractors.base import Extractor
 
 
 class XlsxExtractor(Extractor):

@@ -1,0 +1,120 @@
+{
+    "name": "rag-documents",
+    "fields": [
+        {
+            "name": "id",
+            "type": "Edm.String",
+            "key": true,
+            "filterable": true,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": false,
+            "facetable": false
+        },
+        {
+            "name": "doc_id",
+            "type": "Edm.String",
+            "filterable": true,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": false,
+            "facetable": false
+        },
+        {
+            "name": "doc_name",
+            "type": "Edm.String",
+            "filterable": false,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": false,
+            "facetable": false
+        },
+        {
+            "name": "dataset_id",
+            "type": "Edm.String",
+            "filterable": true,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": false,
+            "facetable": false
+        },
+        {
+            "name": "chunk_index",
+            "type": "Edm.Int32",
+            "filterable": false,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": false,
+            "facetable": false
+        },
+        {
+            "name": "content",
+            "type": "Edm.String",
+            "searchable": true,
+            "retrievable": true,
+            "filterable": false,
+            "sortable": false,
+            "facetable": false,
+            "analyzer": "standard.lucene"
+        },
+        {
+            "name": "content_vector",
+            "type": "Collection(Edm.Single)",
+            "searchable": true,
+            "retrievable": false,
+            "filterable": false,
+            "sortable": false,
+            "facetable": false,
+            "dimensions": 1536,
+            "vectorSearchProfile": "default-hnsw"
+        },
+        {
+            "name": "uploaded_at",
+            "type": "Edm.DateTimeOffset",
+            "filterable": true,
+            "retrievable": true,
+            "searchable": false,
+            "sortable": true,
+            "facetable": false
+        }
+    ],
+    "vectorSearch": {
+        "algorithms": [
+            {
+                "name": "hnsw-cosine",
+                "kind": "hnsw",
+                "hnswParameters": {
+                    "m": 4,
+                    "efConstruction": 400,
+                    "efSearch": 500,
+                    "metric": "cosine"
+                }
+            }
+        ],
+        "profiles": [
+            {
+                "name": "default-hnsw",
+                "algorithm": "hnsw-cosine"
+            }
+        ]
+    },
+    "semantic": {
+        "defaultConfiguration": "default",
+        "configurations": [
+            {
+                "name": "default",
+                "prioritizedFields": {
+                    "titleField": {
+                        "fieldName": "doc_name"
+                    },
+                    "prioritizedContentFields": [
+                        {
+                            "fieldName": "content"
+                        }
+                    ],
+                    "prioritizedKeywordsFields": []
+                }
+            }
+        ]
+    }
+}

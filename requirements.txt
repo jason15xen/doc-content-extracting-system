@@ -6,3 +6,12 @@ openpyxl
 python-pptx
 PyMuPDF
 pymupdf4llm
+
+pydantic-settings
+sqlalchemy>=2.0
+asyncpg
+alembic
+azure-search-documents>=11.5.0
+openai>=1.40
+tiktoken
+tenacity

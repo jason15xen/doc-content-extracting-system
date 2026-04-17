@@ -50,6 +50,10 @@ docker-image/
 *.tar
 *.tar.gz
 
+# Runtime storage
+storage/uploads/*
+!storage/uploads/.gitkeep
+
 # Type checkers
 .mypy_cache/
 .ruff_cache/
