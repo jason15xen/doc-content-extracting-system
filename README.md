@@ -78,94 +78,123 @@ Returns the list of accepted extensions.
 
 ### `POST /extract`
 
-Upload one file as `multipart/form-data` under field `file`. Response is JSON.
+Upload one or more files as `multipart/form-data` under the field name `files`. Response is always a JSON **array** — one item per input file, in the order they were sent.
 
 ```bash
-curl -F 'file=@/path/to/report.xlsx' http://localhost:8889/extract
+# Single file (response is a 1-item list)
+curl -F 'files=@/path/to/report.xlsx' http://localhost:8889/extract
+
+# Multiple files in one request
+curl -F 'files=@a.docx' -F 'files=@b.pdf' -F 'files=@c.xlsx' http://localhost:8889/extract
 ```
+
+All files are extracted **concurrently** via the threadpool. **Per-file errors do not fail the whole request** — if one file is unsupported or fails to parse, that item's entry in the response carries an `error` field and the other files still succeed.
 
 **Status codes:**
 
 | Code | Meaning |
 | --- | --- |
-| `200` | Extraction succeeded |
-| `413` | File exceeds `MAX_UPLOAD_MB` (default 100 MB) |
-| `415` | Unsupported extension |
-| `422` | Extraction or LibreOffice conversion failed |
+| `200` | Request processed. Individual per-file failures (unsupported extension, oversize, parse error) appear as `error` fields inside the response list — they do **not** flip the overall status. |
+| `422` | Request itself was malformed (e.g. missing `files` field). |
 
 ## Response type
 
-Defined in [app/schemas.py](app/schemas.py):
+The envelope is always a **list** — even when you send a single file (you get a 1-item list back). Each item is either a **success** or an **error**, distinguished by the presence of the `error` field.
+
+Per-item model defined in [app/schemas.py](app/schemas.py):
 
 ```python
 class ExtractionResponse(BaseModel):
-    filename: str     # original uploaded filename
-    file_type: str    # normalized ext without dot, e.g. "docx"
-    plain_text: str   # full textual content in reading order
+    filename: str                  # original uploaded filename (always present)
+    file_type: str | None = None   # only on success
+    plain_text: str | None = None  # only on success
+    error: str | None = None       # only on failure
 ```
+
+`None` fields are omitted from the serialized JSON (`response_model_exclude_none=True`), so clients see a clean shape:
+
+- **Success item** — `{filename, file_type, plain_text}`
+- **Error item** — `{filename, error}`
 
 Equivalent TypeScript:
 
 ```ts
-type ExtractionResponse = {
-  filename: string;
-  file_type: "docx" | "docm" | "xlsx" | "xlsm" | "pptx" | "pptm"
-           | "doc"  | "xls"  | "ppt"  | "pdf"  | "txt"  | "md";
-  plain_text: string;
-};
+type ExtractionItem =
+  | { filename: string; file_type: string; plain_text: string }     // success
+  | { filename: string; error: string };                            // failure
+
+type ExtractResponse = ExtractionItem[];
 ```
+
+Distinguish success vs. failure with `"error" in item` (or in TS, with a discriminated union guard).
 
 ### Example responses
 
-**docx** (headers/footers + body + table)
+**Single file** — uploading `report.xlsx`:
 
 ```json
-{
-  "filename": "memo.docx",
-  "file_type": "docx",
-  "plain_text": "Company header\nPage 1\nIntroduction\nname\tvalue\nalpha\t1"
-}
+[
+  {
+    "filename": "report.xlsx",
+    "file_type": "xlsx",
+    "plain_text": "Data\nname\tvalue\nalpha\t1\nbeta\t2"
+  }
+]
 ```
 
-**xlsx**
+**Multiple files** — uploading `memo.docx` + `guide.pdf` + `notes.md`:
 
 ```json
-{
-  "filename": "report.xlsx",
-  "file_type": "xlsx",
-  "plain_text": "Data\nname\tvalue\nalpha\t1\nbeta\t2"
-}
+[
+  {
+    "filename": "memo.docx",
+    "file_type": "docx",
+    "plain_text": "Company header\nPage 1\nIntroduction\nname\tvalue\nalpha\t1"
+  },
+  {
+    "filename": "guide.pdf",
+    "file_type": "pdf",
+    "plain_text": "[Page 1]\nHello pdf world\n[Page 2]\nSecond page body"
+  },
+  {
+    "filename": "notes.md",
+    "file_type": "md",
+    "plain_text": "# Heading\n\nBody paragraph."
+  }
+]
 ```
 
-**pptx** (with speaker notes)
+**Mixed batch with one bad file** — uploading `good.docx` + `bad.zip` + `too_big.pdf`:
 
 ```json
-{
-  "filename": "deck.pptx",
-  "file_type": "pptx",
-  "plain_text": "[Slide 1]\nSlide title\nSlide subtitle\nSpeaker notes here"
-}
+[
+  {
+    "filename": "good.docx",
+    "file_type": "docx",
+    "plain_text": "Hello docx world\nA1\tB1\nA2\tB2"
+  },
+  {
+    "filename": "bad.zip",
+    "error": "Unsupported file extension: .zip"
+  },
+  {
+    "filename": "too_big.pdf",
+    "error": "File exceeds 100 MB limit"
+  }
+]
 ```
 
-**pdf**
+HTTP status is still `200` — the bad files are reported per-item, and `good.docx` is processed normally.
 
-```json
-{
-  "filename": "guide.pdf",
-  "file_type": "pdf",
-  "plain_text": "[Page 1]\nHello pdf world\n[Page 2]\nSecond page body"
-}
-```
+**Per-format `plain_text` shape** (shown as the `plain_text` field only):
 
-**txt / md**
-
-```json
-{
-  "filename": "notes.md",
-  "file_type": "md",
-  "plain_text": "# Heading\n\nBody paragraph."
-}
-```
+| Type | Example `plain_text` |
+| --- | --- |
+| docx (headers/footers + body + table) | `"Company header\nPage 1\nIntroduction\nname\tvalue\nalpha\t1"` |
+| xlsx | `"Data\nname\tvalue\nalpha\t1\nbeta\t2"` |
+| pptx (with speaker notes) | `"[Slide 1]\nSlide title\nSlide subtitle\nSpeaker notes here"` |
+| pdf (multi-page) | `"[Page 1]\nHello pdf world\n[Page 2]\nSecond page body"` |
+| txt / md | `"# Heading\n\nBody paragraph."` |
 
 **legacy (`.doc` / `.xls` / `.ppt`)** — `file_type` reflects the original extension (e.g. `"doc"`); the text content is produced by converting the file to its OpenXML equivalent via LibreOffice first, so the shape of `plain_text` matches the corresponding OpenXML format.
 
@@ -179,12 +208,12 @@ The base class linearizes structured content into `plain_text` using these conve
 - **Slides (pptx)** — preceded by `[Slide N]` on its own line.
 - **Pages (pdf)** — preceded by `[Page N]` on its own line; page body is Markdown (headings as `#`, detected tables as pipe-tables, lists as `- `) because `pymupdf4llm` produces Markdown for better column-aware reading order.
 
-### Error response
+### Request-level errors
 
-FastAPI returns JSON with a single `detail` string for 4xx errors:
+Per-file failures live inside the response list (above). A 4xx only happens for malformed *requests* (e.g. missing the `files` field entirely):
 
 ```json
-{ "detail": "Unsupported file extension: .zip" }
+{ "detail": "No files provided" }
 ```
 
 ## Extraction behavior per type

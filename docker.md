@@ -58,20 +58,37 @@ curl http://localhost:8889/health
 
 ## Use the API
 
-### Extract a document
+### Extract one or more documents
+
+The form field is `files` (you can repeat it). Response is always a JSON **array** — one item per uploaded file. Per-file failures are reported **inside** the list (as an `error` field on that item) and don't fail the whole request.
 
 ```bash
-curl -F 'file=@/path/to/your/report.xlsx' http://localhost:8889/extract
+# Single file → 1-item list back
+curl -F 'files=@/path/to/your/report.xlsx' http://localhost:8889/extract
+
+# Multiple files → N-item list back, processed concurrently
+curl -F 'files=@a.docx' -F 'files=@b.pdf' -F 'files=@c.xlsx' http://localhost:8889/extract
 ```
 
-Response:
+Success response:
 
 ```json
-{
-  "filename": "report.xlsx",
-  "file_type": "xlsx",
-  "plain_text": "Sheet1\nname\tvalue\nalpha\t1\nbeta\t2"
-}
+[
+  {
+    "filename": "report.xlsx",
+    "file_type": "xlsx",
+    "plain_text": "Data\nname\tvalue\nalpha\t1\nbeta\t2"
+  }
+]
+```
+
+Mixed response (one bad file in a batch):
+
+```json
+[
+  { "filename": "good.docx", "file_type": "docx", "plain_text": "..." },
+  { "filename": "bad.zip",   "error": "Unsupported file extension: .zip" }
+]
 ```
 
 Works for any supported extension: `.docx`, `.xlsx`, `.pptx`, `.docm`, `.xlsm`, `.pptm`, `.doc`, `.xls`, `.ppt`, `.pdf`, `.txt`, `.md`.
