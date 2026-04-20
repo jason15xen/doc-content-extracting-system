@@ -97,3 +97,9 @@ async def list_ids_by_dataset(
 async def list_all_ids(session: AsyncSession) -> list[uuid.UUID]:
     stmt = select(Document.id)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def delete_all(session: AsyncSession) -> int:
+    stmt = delete(Document)
+    result = await session.execute(stmt)
+    return result.rowcount or 0

@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_session
@@ -9,6 +10,10 @@ from app.schemas.common import PageMeta
 from app.schemas.tasks import TaskListOut, TaskOut
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+class DeletedCount(BaseModel):
+    deleted: int
 
 
 @router.get("", response_model=TaskListOut)
@@ -44,3 +49,23 @@ async def get_task(
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     return TaskOut.model_validate(task)
+
+
+@router.delete("/{task_id}", response_model=DeletedCount)
+async def delete_task(
+    task_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> DeletedCount:
+    count = await tasks_repo.delete_one(session, task_id)
+    if count == 0:
+        raise HTTPException(status_code=404, detail="task not found")
+    await session.commit()
+    return DeletedCount(deleted=count)
+
+
+@router.delete("", response_model=DeletedCount)
+async def delete_all_tasks(
+    session: AsyncSession = Depends(get_session),
+) -> DeletedCount:
+    count = await tasks_repo.delete_all(session)
+    await session.commit()
+    return DeletedCount(deleted=count)

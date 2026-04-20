@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -17,7 +18,10 @@ from app.settings import get_settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
     engine = build_engine(settings)
     sessionmaker = build_sessionmaker(engine)
@@ -74,3 +78,29 @@ app.include_router(documents.router)
 app.include_router(tasks.router)
 app.include_router(search.router)
 app.include_router(admin.router)
+
+
+def _patch_upload_schemas(schema: dict[str, Any]) -> None:
+    """Fix Swagger UI file-upload rendering.
+
+    FastAPI + Pydantic v2 emits ``contentMediaType: application/octet-stream``
+    for UploadFile fields, but Swagger UI only shows file-picker widgets when
+    the item schema is ``{type: string, format: binary}``.
+    """
+    for obj in (schema.get("components", {}).get("schemas", {}) or {}).values():
+        for prop in (obj.get("properties") or {}).values():
+            items = prop.get("items", prop)
+            if items.pop("contentMediaType", None):
+                items["format"] = "binary"
+
+
+_original_openapi = app.openapi
+
+
+def _patched_openapi() -> dict[str, Any]:
+    schema = _original_openapi()
+    _patch_upload_schemas(schema)
+    return schema
+
+
+app.openapi = _patched_openapi  # type: ignore[method-assign]

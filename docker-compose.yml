@@ -19,7 +19,10 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - .env
+      - path: .env
+        required: false
+      - path: .env.dev
+        required: false
     ports:
       - "8889:8889"
     volumes:

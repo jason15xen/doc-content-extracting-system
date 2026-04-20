@@ -6,24 +6,42 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    # Reads both .env (base) and .env.dev (local overrides). .env.dev wins.
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.dev"),
+        extra="ignore",
+        case_sensitive=False,
+    )
 
+    # ---- Database ----
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@postgres:5432/rag"
     )
+
+    # ---- Local file storage ----
     storage_dir: Path = Field(default=Path("./storage"))
     max_upload_mb: int = 100
 
+    # ---- Azure AI Search ----
     azure_search_endpoint: str = ""
     azure_search_api_key: str = ""
-    azure_search_index_name: str = "rag-documents"
+    azure_search_index: str = "rag-documents"
 
+    # ---- Azure OpenAI chat (separate resource in some setups) ----
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""
+    azure_openai_deployment: str = ""
+    azure_openai_model: str = ""
     azure_openai_api_version: str = "2024-10-21"
-    azure_openai_embed_deployment: str = "text-embedding-3-small"
-    azure_openai_chat_deployment: str = "gpt-4o-mini"
 
+    # ---- Azure OpenAI embeddings (may be a different resource/endpoint) ----
+    # If left blank, falls back to the chat endpoint/key above.
+    azure_openai_embedding_endpoint: str = ""
+    azure_openai_embedding_api_key: str = ""
+    azure_openai_embedding_deployment: str = ""
+    azure_openai_embedding_model: str = ""
+
+    # ---- Pipeline tuning ----
     embed_batch_size: int = 16
     chunk_tokens: int = 800
     chunk_overlap: int = 100
@@ -33,12 +51,22 @@ class Settings(BaseSettings):
     chat_max_context_chunks: int = 12
 
     ingest_concurrency: int = 2
+
+    # ---- Feature flags ----
     enable_semantic_ranking: bool = True
     ensure_index_on_startup: bool = True
 
     @property
     def uploads_dir(self) -> Path:
         return self.storage_dir / "uploads"
+
+    @property
+    def effective_embedding_endpoint(self) -> str:
+        return self.azure_openai_embedding_endpoint or self.azure_openai_endpoint
+
+    @property
+    def effective_embedding_api_key(self) -> str:
+        return self.azure_openai_embedding_api_key or self.azure_openai_api_key
 
 
 @lru_cache

@@ -24,7 +24,7 @@ class Chatter:
             azure_endpoint=settings.azure_openai_endpoint,
             api_version=settings.azure_openai_api_version,
         )
-        self._deployment = settings.azure_openai_chat_deployment
+        self._deployment = settings.azure_openai_deployment
 
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError)),

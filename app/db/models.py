@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, func, text
+from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, Index, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,8 +46,8 @@ class Dataset(Base):
     )
     name: Mapped[str] = mapped_column(unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
     documents: Mapped[list["Document"]] = relationship(back_populates="dataset")
 
@@ -73,7 +73,7 @@ class Document(Base):
         ForeignKey("datasets.id", ondelete="SET NULL"),
         nullable=True,
     )
-    uploaded_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     status: Mapped[str] = mapped_column(nullable=False, default=DocumentStatus.PENDING.value)
     storage_path: Mapped[str | None] = mapped_column(nullable=True)
     chunk_count: Mapped[int] = mapped_column(nullable=False, default=0)
@@ -114,7 +114,7 @@ class Task(Base):
     status: Mapped[str] = mapped_column(nullable=False, default=TaskStatus.QUEUED.value)
     stage: Mapped[str | None] = mapped_column(nullable=True)
     error_message: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
     document: Mapped[Document | None] = relationship(back_populates="tasks")

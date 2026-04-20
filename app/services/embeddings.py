@@ -13,11 +13,11 @@ from app.settings import Settings
 class Embedder:
     def __init__(self, settings: Settings) -> None:
         self._client = AsyncAzureOpenAI(
-            api_key=settings.azure_openai_api_key,
-            azure_endpoint=settings.azure_openai_endpoint,
+            api_key=settings.effective_embedding_api_key,
+            azure_endpoint=settings.effective_embedding_endpoint,
             api_version=settings.azure_openai_api_version,
         )
-        self._deployment = settings.azure_openai_embed_deployment
+        self._deployment = settings.azure_openai_embedding_deployment
         self._batch_size = settings.embed_batch_size
 
     async def embed_many(self, texts: list[str]) -> list[list[float]]:

@@ -2,7 +2,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Document, DocumentStatus, PipelineStage, Task, TaskStatus, TaskType
@@ -95,4 +95,16 @@ async def reconcile_running_tasks(session: AsyncSession) -> int:
         .where(Document.status == DocumentStatus.PROCESSING.value)
         .values(status=DocumentStatus.FAILED.value)
     )
+    return result.rowcount or 0
+
+
+async def delete_one(session: AsyncSession, task_id: uuid.UUID) -> int:
+    stmt = delete(Task).where(Task.id == task_id)
+    result = await session.execute(stmt)
+    return result.rowcount or 0
+
+
+async def delete_all(session: AsyncSession) -> int:
+    stmt = delete(Task)
+    result = await session.execute(stmt)
     return result.rowcount or 0

@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tempfile
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -19,7 +19,9 @@ router = APIRouter(tags=["extract"])
     response_model=list[ExtractionResponse],
     response_model_exclude_none=True,
 )
-async def extract(files: list[UploadFile] = File(...)) -> list[ExtractionResponse]:
+async def extract(
+    files: Annotated[list[UploadFile], File(description="Documents to extract text from")],
+) -> list[ExtractionResponse]:
     if not files:
         raise HTTPException(status_code=422, detail="No files provided")
     results = await asyncio.gather(*(_process_one(f) for f in files))

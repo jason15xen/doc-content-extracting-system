@@ -131,7 +131,7 @@ class SearchGateway:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         cred = AzureKeyCredential(settings.azure_search_api_key)
-        self._index_name = settings.azure_search_index_name
+        self._index_name = settings.azure_search_index
         self._endpoint = settings.azure_search_endpoint
         self._cred = cred
         self._enable_semantic = settings.enable_semantic_ranking

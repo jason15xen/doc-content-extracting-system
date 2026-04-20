@@ -191,3 +191,17 @@ async def delete_documents(
     await session.commit()
     background.add_task(run_delete_task, task.id, list(body.doc_ids))
     return DeleteAccepted(task_id=task.id)
+
+
+@router.delete("/all", status_code=status.HTTP_202_ACCEPTED)
+async def delete_all_documents(
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> DeleteAccepted:
+    doc_ids = await documents_repo.list_all_ids(session)
+    if not doc_ids:
+        raise HTTPException(status_code=404, detail="no documents to delete")
+    task = await tasks_repo.create(session, task_type=TaskType.DELETE)
+    await session.commit()
+    background.add_task(run_delete_task, task.id, doc_ids)
+    return DeleteAccepted(task_id=task.id)
