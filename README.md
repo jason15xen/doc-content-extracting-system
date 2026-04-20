@@ -1,275 +1,342 @@
-# Document Content Extraction API
+# RAG Document Ingestion & Search API
 
-A FastAPI service that extracts the full textual content of office documents and returns it as **plain text**.
+A FastAPI service that ingests documents, extracts text, chunks and embeds them via Azure OpenAI, indexes them in Azure AI Search, and serves hybrid RAG search with LLM-generated answers.
 
-## Supported file types
+## Architecture
+
+```
+  Upload          Background pipeline              Search
+  ──────          ───────────────────              ──────
+
+  POST /documents/upload
+       │
+       ▼
+  Save to disk ──► Extract text ──► Chunk (tiktoken) ──► Embed (Azure OpenAI)
+  + SHA-256 hash   (12 formats)     800 tok / 100 overlap  text-embedding-3-small
+       │                                                        │
+       ▼                                                        ▼
+  PostgreSQL                                              Azure AI Search
+  (documents, tasks, datasets)                            (hybrid: vector + BM25)
+                                                                │
+                                                    POST /search│
+                                                                ▼
+                                                          Top-5 docs by score
+                                                                │
+                                                                ▼
+                                                          Chat model (Azure OpenAI)
+                                                                │
+                                                                ▼
+                                                          { answer, sources }
+```
+
+## Supported document types
 
 | Category | Extensions |
-| --- | --- |
+|---|---|
 | OpenXML | `.docx`, `.xlsx`, `.pptx`, `.docm`, `.xlsm`, `.pptm` |
-| Legacy binary | `.doc`, `.xls`, `.ppt` |
+| Legacy binary | `.doc`, `.xls`, `.ppt` (via LibreOffice) |
 | Other | `.pdf`, `.txt`, `.md` |
 
-## How it works
+## Quick start
 
-```
-         POST /extract  (multipart: file=@doc.xlsx)
-                │
-                ▼
-        dispatcher (pick extractor by extension)
-                │
-  ┌──────────────┴──────────────────────────────────┐
-  │                                                  │
- .docx/.docm → DocxExtractor    (python-docx — body + headers/footers + tables)
- .xlsx/.xlsm → XlsxExtractor    (openpyxl, data_only=True — evaluated cell values)
- .pptx/.pptm → PptxExtractor    (python-pptx — shapes, tables, speaker notes)
- .doc/.xls/.ppt → LegacyExtractor
-                 └─ soffice --headless --convert-to {docx|xlsx|pptx}
-                    then delegates to the matching OpenXML extractor
- .pdf        → PdfExtractor     (pymupdf4llm — column-aware Markdown per page)
- .txt/.md    → TextExtractor    (utf-8-sig → utf-8 → utf-16 → latin-1 fallback)
-```
-
-Each extractor internally builds a list of structured elements in reading order; the base class linearizes them into a single `plain_text` string that is returned to the caller.
-
-### Key files
-
-- [app/main.py](app/main.py) — FastAPI endpoints (`/extract`, `/health`, `/supported`)
-- [app/dispatcher.py](app/dispatcher.py) — picks the right extractor by extension
-- [app/extractors/](app/extractors/) — one module per file type
-- [app/extractors/base.py](app/extractors/base.py) — shared `Extractor` base + `elements_to_plain_text`
-- [app/services/libreoffice.py](app/services/libreoffice.py) — `soffice` subprocess wrapper (used for legacy formats)
-- [app/config.py](app/config.py) — supported extensions, upload limit, soffice timeout
-
-## Running
-
-### Docker (recommended — bundles LibreOffice)
+### 1. Configure
 
 ```bash
-docker build -t doc-extract .
-docker run --rm -p 8889:8889 doc-extract
+cp .env.example .env      # or use .env.dev for development
 ```
 
-### Local
+Fill in the required values:
 
-You need Python 3.10+ and, if you want to handle `.doc/.xls/.ppt`, LibreOffice installed (`soffice` on `PATH`).
+| Variable | Where to find it |
+|---|---|
+| `AZURE_SEARCH_ENDPOINT` | Azure Portal > Search service > Overview |
+| `AZURE_SEARCH_API_KEY` | Azure Portal > Search service > Keys (admin key) |
+| `AZURE_OPENAI_ENDPOINT` | Azure Portal > OpenAI resource > Keys and Endpoint |
+| `AZURE_OPENAI_API_KEY` | Same as above |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI Studio > Deployments (chat model) |
+| `AZURE_OPENAI_EMBEDDING_ENDPOINT` | Embedding resource endpoint (if separate) |
+| `AZURE_OPENAI_EMBEDDING_API_KEY` | Embedding resource key (if separate) |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding deployment name |
+
+If chat and embedding share the same Azure OpenAI resource, leave `AZURE_OPENAI_EMBEDDING_ENDPOINT` and `AZURE_OPENAI_EMBEDDING_API_KEY` blank -- the app falls back to the chat endpoint/key.
+
+### 2. Run
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8889
+docker compose up --build
 ```
 
-## Endpoints
+This starts:
+- **PostgreSQL** (port 5432, internal) -- document/task/dataset metadata
+- **API** (port 8889) -- FastAPI with Alembic migration on boot
 
-### `GET /health`
+### 3. Use
+
+Open Swagger UI at `http://localhost:8889/docs`.
+
+## API endpoints
+
+### Health & info
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | `{"status": "ok"}` |
+| `GET` | `/supported` | List of accepted file extensions |
+
+### Documents
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/documents/upload` | Upload files (multipart). Optional `dataset_id` form field. Returns 202 with per-file status + task IDs. |
+| `GET` | `/documents` | List documents. Query params: `limit`, `offset`, `dataset_id`, `status_filter`. |
+| `DELETE` | `/documents` | Delete specific documents. Body: `{"doc_ids": ["uuid", ...]}`. Deletes from DB + Azure AI Search. Returns 202 + task_id. |
+| `DELETE` | `/documents/all` | Delete all documents from DB + Azure AI Search. Returns 202 + task_id. |
+
+#### Upload response example
 
 ```json
-{"status": "ok"}
+{
+  "items": [
+    {"filename": "report.pdf", "status": "accepted", "document_id": "uuid", "task_id": "uuid"},
+    {"filename": "bad.zip", "status": "failed", "reason": "unsupported_extension:.zip"},
+    {"filename": "copy.pdf", "status": "failed", "reason": "duplicate"}
+  ]
+}
 ```
 
-### `GET /supported`
+### Tasks (processing monitor)
 
-Returns the list of accepted extensions.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/tasks` | List all tasks. Query params: `limit`, `offset`, `status`, `document_id`, `task_type`. |
+| `GET` | `/tasks/{task_id}` | Get single task with progress and result. |
+| `DELETE` | `/tasks/{task_id}` | Delete a single task record. |
+| `DELETE` | `/tasks` | Delete all task records. |
+
+#### Task response example
 
 ```json
-{"extensions": [".doc", ".docm", ".docx", ".md", ".pdf", ".ppt", ".pptm", ".pptx", ".txt", ".xls", ".xlsm", ".xlsx"]}
+{
+  "id": "661a70e4-...",
+  "document_id": "44b0ba9f-...",
+  "task_type": "ingest",
+  "status": "running",
+  "stage": "embedded",
+  "error_message": null,
+  "progress": 75,
+  "result": "processing (embedded)",
+  "created_at": "2026-04-20T02:27:25Z",
+  "updated_at": "2026-04-20T02:27:28Z"
+}
 ```
 
-### `POST /extract`
+Progress mapping:
 
-Upload one or more files as `multipart/form-data` under the field name `files`. Response is always a JSON **array** — one item per input file, in the order they were sent.
+| Stage | Progress |
+|---|---|
+| `uploaded` | 0% |
+| `extracted` | 25% |
+| `chunked` | 50% |
+| `embedded` | 75% |
+| `indexed` | 100% |
 
-```bash
-# Single file (response is a 1-item list)
-curl -F 'files=@/path/to/report.xlsx' http://localhost:8889/extract
-
-# Multiple files in one request
-curl -F 'files=@a.docx' -F 'files=@b.pdf' -F 'files=@c.xlsx' http://localhost:8889/extract
+On failure, `result` contains the stage and error:
+```json
+{
+  "status": "failed",
+  "stage": "embedded",
+  "progress": 75,
+  "result": "failed at stage 'embedded': EmbeddingError: connection refused"
+}
 ```
 
-All files are extracted **concurrently** via the threadpool. **Per-file errors do not fail the whole request** — if one file is unsupported or fails to parse, that item's entry in the response carries an `error` field and the other files still succeed.
+### Datasets
 
-**Status codes:**
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/datasets` | Create dataset. Body: `{"name": "...", "description": "..."}`. |
+| `GET` | `/datasets` | List all datasets. |
+| `PATCH` | `/datasets/{id}` | Update name/description. |
+| `DELETE` | `/datasets/{id}` | Cascade delete: removes dataset + all its documents + AI Search chunks. Returns 202 + task_id. |
 
-| Code | Meaning |
-| --- | --- |
-| `200` | Request processed. Individual per-file failures (unsupported extension, oversize, parse error) appear as `error` fields inside the response list — they do **not** flip the overall status. |
-| `422` | Request itself was malformed (e.g. missing `files` field). |
+### Search
 
-## Response type
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/search` | Hybrid RAG search with LLM answer. |
 
-The envelope is always a **list** — even when you send a single file (you get a 1-item list back). Each item is either a **success** or an **error**, distinguished by the presence of the `error` field.
-
-Per-item model defined in [app/schemas.py](app/schemas.py):
-
-```python
-class ExtractionResponse(BaseModel):
-    filename: str                  # original uploaded filename (always present)
-    file_type: str | None = None   # only on success
-    plain_text: str | None = None  # only on success
-    error: str | None = None       # only on failure
-```
-
-`None` fields are omitted from the serialized JSON (`response_model_exclude_none=True`), so clients see a clean shape:
-
-- **Success item** — `{filename, file_type, plain_text}`
-- **Error item** — `{filename, error}`
-
-Equivalent TypeScript:
-
-```ts
-type ExtractionItem =
-  | { filename: string; file_type: string; plain_text: string }     // success
-  | { filename: string; error: string };                            // failure
-
-type ExtractResponse = ExtractionItem[];
-```
-
-Distinguish success vs. failure with `"error" in item` (or in TS, with a discriminated union guard).
-
-### Example responses
-
-**Single file** — uploading `report.xlsx`:
+#### Request
 
 ```json
-[
-  {
-    "filename": "report.xlsx",
-    "file_type": "xlsx",
-    "plain_text": "Data\nname\tvalue\nalpha\t1\nbeta\t2"
-  }
-]
+{
+  "query": "What is the annual revenue?",
+  "dataset_id": "uuid (optional -- omit to search all)",
+  "top_k": 5
+}
 ```
 
-**Multiple files** — uploading `memo.docx` + `guide.pdf` + `notes.md`:
+- **`dataset_id` omitted** -- searches all documents across all datasets.
+- **`dataset_id` given** -- searches only documents in that dataset.
+
+#### Response
 
 ```json
-[
-  {
-    "filename": "memo.docx",
-    "file_type": "docx",
-    "plain_text": "Company header\nPage 1\nIntroduction\nname\tvalue\nalpha\t1"
-  },
-  {
-    "filename": "guide.pdf",
-    "file_type": "pdf",
-    "plain_text": "[Page 1]\nHello pdf world\n[Page 2]\nSecond page body"
-  },
-  {
-    "filename": "notes.md",
-    "file_type": "md",
-    "plain_text": "# Heading\n\nBody paragraph."
-  }
-]
+{
+  "answer": "The annual revenue was $12M according to [report.pdf#3].",
+  "sources": [
+    {
+      "doc_id": "uuid",
+      "doc_name": "report.pdf",
+      "score": 1.7,
+      "snippet": "Revenue grew 12% year over year...",
+      "chunk_indexes": [2, 3, 5]
+    }
+  ]
+}
 ```
 
-**Mixed batch with one bad file** — uploading `good.docx` + `bad.zip` + `too_big.pdf`:
+Sources are the top-5 documents ranked by cumulative score (sum of per-chunk scores across all matching chunks in that document).
 
-```json
-[
-  {
-    "filename": "good.docx",
-    "file_type": "docx",
-    "plain_text": "Hello docx world\nA1\tB1\nA2\tB2"
-  },
-  {
-    "filename": "bad.zip",
-    "error": "Unsupported file extension: .zip"
-  },
-  {
-    "filename": "too_big.pdf",
-    "error": "File exceeds 100 MB limit"
-  }
-]
-```
+### Text extraction (legacy)
 
-HTTP status is still `200` — the bad files are reported per-item, and `good.docx` is processed normally.
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/extract` | Synchronous text extraction. Returns plain text immediately, no DB/embedding/indexing. |
 
-**Per-format `plain_text` shape** (shown as the `plain_text` field only):
+### Admin / cleanup
 
-| Type | Example `plain_text` |
-| --- | --- |
-| docx (headers/footers + body + table) | `"Company header\nPage 1\nIntroduction\nname\tvalue\nalpha\t1"` |
-| xlsx | `"Data\nname\tvalue\nalpha\t1\nbeta\t2"` |
-| pptx (with speaker notes) | `"[Slide 1]\nSlide title\nSlide subtitle\nSpeaker notes here"` |
-| pdf (multi-page) | `"[Page 1]\nHello pdf world\n[Page 2]\nSecond page body"` |
-| txt / md | `"# Heading\n\nBody paragraph."` |
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/admin/cleanup/orphan-files` | Delete files on disk with no matching DB record. |
+| `POST` | `/admin/cleanup/orphan-index` | Delete AI Search chunks whose document no longer exists in DB. |
 
-**legacy (`.doc` / `.xls` / `.ppt`)** — `file_type` reflects the original extension (e.g. `"doc"`); the text content is produced by converting the file to its OpenXML equivalent via LibreOffice first, so the shape of `plain_text` matches the corresponding OpenXML format.
+## Ingestion pipeline
 
-### Plain-text formatting rules
+When a document is uploaded, a background task runs this pipeline:
 
-The base class linearizes structured content into `plain_text` using these conventions:
+1. **Upload** -- file saved to `storage/uploads/{doc_id}{ext}`, SHA-256 computed, duplicates rejected.
+2. **Extract** -- text extracted using the appropriate extractor (docx, pdf, etc.).
+3. **Chunk** -- text split into 800-token chunks with 100-token overlap (tiktoken `cl100k_base`).
+4. **Embed** -- each chunk embedded via Azure OpenAI `text-embedding-3-small` (1536 dims, batched 16 at a time).
+5. **Index** -- chunks pushed to Azure AI Search with vector + metadata.
+6. **Cleanup** -- local file deleted on success; preserved on failure for debugging.
 
-- **Paragraphs** — joined with `\n`.
-- **Tables** — rows joined with `\n`, cells joined with `\t`.
-- **Sheets (xlsx)** — preceded by the sheet name on its own line, then rows as above.
-- **Slides (pptx)** — preceded by `[Slide N]` on its own line.
-- **Pages (pdf)** — preceded by `[Page N]` on its own line; page body is Markdown (headings as `#`, detected tables as pipe-tables, lists as `- `) because `pymupdf4llm` produces Markdown for better column-aware reading order.
+Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor progress.
 
-### Request-level errors
+## Database schema
 
-Per-file failures live inside the response list (above). A 4xx only happens for malformed *requests* (e.g. missing the `files` field entirely):
+### datasets
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| name | TEXT UNIQUE |
+| description | TEXT |
+| created_at | TIMESTAMPTZ |
+| updated_at | TIMESTAMPTZ |
 
-```json
-{ "detail": "No files provided" }
-```
+### documents
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| name | TEXT (original filename) |
+| hash | CHAR(64) UNIQUE (SHA-256) |
+| dataset_id | UUID FK (nullable) |
+| uploaded_at | TIMESTAMPTZ |
+| status | pending / processing / success / failed |
+| storage_path | TEXT (null after success) |
+| chunk_count | INTEGER |
 
-## Extraction behavior per type
+### tasks
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| document_id | UUID FK (nullable) |
+| task_type | ingest / delete / dataset_cascade |
+| status | queued / running / success / failed |
+| stage | uploaded / extracted / chunked / embedded / indexed / deleted |
+| error_message | TEXT |
+| created_at | TIMESTAMPTZ |
+| updated_at | TIMESTAMPTZ |
 
-- **docx/docm** — walks body *and* all section headers/footers in document order so paragraphs and tables interleave correctly. Table cells preserve multi-paragraph text (joined with `\n`).
-- **xlsx/xlsm** — `openpyxl(data_only=True)` returns **evaluated formula results** rather than the formula string, matching what you see when you open the file in Excel. `None` cells become `""`.
-- **pptx/pptm** — per slide, walks shapes in z-order, descends into groups, and extracts text frames + tables. Speaker notes are appended after slide body text.
-- **legacy (`.doc` / `.xls` / `.ppt`)** — headless LibreOffice converts the file to its OpenXML equivalent in a temp dir, then the matching OpenXML extractor runs. A 60 s timeout is enforced; `soffice` stderr is surfaced on failure. Requires `soffice` on `PATH`. Each conversion uses an isolated `UserInstallation` profile so concurrent requests don't collide.
-- **pdf** — `pymupdf4llm.to_markdown(..., page_chunks=True)` per page. Detects multi-column layouts and emits each column fully before moving to the next, matching natural reading order.
-- **txt/md** — raw bytes with a four-step encoding fallback (`utf-8-sig` → `utf-8` → `utf-16` → `latin-1`).
+## Azure AI Search index
 
-## Concurrency
+Single index (`rag-documents` by default), push model. See [index.json](index.json) for the full schema.
 
-`/extract` is an `async` endpoint that streams the upload in 1 MiB chunks, then dispatches the synchronous extraction work to a threadpool via `run_in_threadpool`. A long soffice conversion on one request does not block other requests from being served.
+Key fields: `id` (chunk key: `{doc_id}_{chunk_idx}`), `doc_id`, `doc_name`, `dataset_id` (filterable), `content` (searchable, BM25), `content_vector` (1536-dim HNSW cosine), `uploaded_at`.
+
+Search uses hybrid mode: vector similarity + BM25 keyword matching + optional semantic reranking (requires Standard S1+ tier).
 
 ## Configuration
 
-All defaults live in [app/config.py](app/config.py):
+All settings are in `.env` / `.env.dev`, read by [app/settings.py](app/settings.py). Key tuning knobs:
 
-| Constant | Default | Meaning |
-| --- | --- | --- |
-| `MAX_UPLOAD_MB` | `100` | Reject uploads larger than this with `413` |
-| `LIBREOFFICE_TIMEOUT_SEC` | `60` | Kill the `soffice` subprocess after this many seconds |
+| Variable | Default | Description |
+|---|---|---|
+| `CHUNK_TOKENS` | 800 | Tokens per chunk |
+| `CHUNK_OVERLAP` | 100 | Overlap between chunks |
+| `EMBED_BATCH_SIZE` | 16 | Chunks per embedding API call |
+| `SEARCH_TOP_K_CHUNKS` | 30 | Chunks retrieved from AI Search per query |
+| `SEARCH_TOP_K_DOCS` | 5 | Distinct documents returned in response |
+| `CHAT_MAX_CONTEXT_CHUNKS` | 12 | Max chunks passed to the chat model |
+| `INGEST_CONCURRENCY` | 2 | Max parallel background ingest tasks |
+| `ENABLE_SEMANTIC_RANKING` | true | Use semantic reranker (needs Standard S1+) |
+| `ENSURE_INDEX_ON_STARTUP` | true | Create/update AI Search index on boot |
+
+## Project structure
+
+```
+app/
+  main.py                      App factory, lifespan, router registration
+  settings.py                  pydantic-settings (reads .env / .env.dev)
+  errors.py                    Exception classes
+  deps.py                      FastAPI dependency injection providers
+  extraction/                  Document text extraction (moved from original project)
+    config.py                  Supported extensions, upload limit
+    dispatcher.py              Extension -> Extractor routing
+    schemas.py                 ExtractionResponse model
+    extractors/                One module per file type
+    services/libreoffice.py    soffice subprocess wrapper
+  db/
+    base.py                    SQLAlchemy DeclarativeBase
+    session.py                 Async engine + session factory
+    models.py                  Document, Task, Dataset ORM models
+  repositories/                Data access layer (documents, tasks, datasets)
+  schemas/                     Pydantic request/response models
+  services/
+    hashing.py                 Streaming SHA-256 + size-capped save
+    chunker.py                 tiktoken-based text splitter
+    embeddings.py              Azure OpenAI embedding client
+    chat.py                    Azure OpenAI chat client (RAG answer)
+    search_index.py            Azure AI Search gateway (index schema, upsert, delete, search)
+    storage.py                 Local file path helpers
+  pipeline/
+    context.py                 Runtime context for background tasks
+    ingest.py                  Upload -> extract -> chunk -> embed -> index
+    delete.py                  Document/dataset deletion from DB + AI Search
+  routers/
+    health.py                  GET /health, GET /supported
+    extract.py                 POST /extract (legacy sync extraction)
+    datasets.py                Dataset CRUD + cascade delete
+    documents.py               Upload, list, delete documents
+    tasks.py                   Task monitoring + cleanup
+    search.py                  POST /search (hybrid RAG)
+    admin.py                   Orphan file/index cleanup
+migrations/                    Alembic (auto-run on boot via entrypoint)
+scripts/entrypoint.sh          alembic upgrade head + uvicorn
+docker-compose.yml             API + PostgreSQL
+Dockerfile
+index.json                     Azure AI Search index schema (reference)
+```
 
 ## Tests
 
 ```bash
-.venv/bin/pip install pytest httpx
-.venv/bin/python -m pytest tests/ -v
+pip install -r requirements.txt
+pip install pytest pytest-asyncio httpx
+python -m pytest tests/ -v
 ```
 
-`tests/conftest.py` generates all fixtures on the fly, including the legacy `.doc/.xls/.ppt` files via `soffice` and a synthetic two-column PDF for the reading-order regression test. Tests that need `soffice` auto-skip when it is not on `PATH`.
-
-## Project layout
-
-```
-app/
-  main.py              # FastAPI app, /extract /health /supported
-  config.py            # supported exts, limits
-  schemas.py           # ExtractionResponse pydantic model
-  dispatcher.py        # extension -> Extractor
-  errors.py            # ExtractionError, UnsupportedFormatError, ConversionError
-  extractors/
-    base.py            # Extractor base class + elements_to_plain_text
-    docx.py            # .docx / .docm
-    xlsx.py            # .xlsx / .xlsm
-    pptx.py            # .pptx / .pptm
-    pdf.py             # .pdf
-    text.py            # .txt / .md
-    legacy.py          # .doc / .xls / .ppt (via soffice, delegates to OpenXML)
-  services/
-    libreoffice.py     # soffice subprocess wrapper
-tests/
-  conftest.py          # builds fixtures (incl. legacy via soffice)
-  test_extract.py      # end-to-end tests for every supported extension
-requirements.txt
-Dockerfile
-.dockerignore
-```
+- `test_extract.py` -- legacy extraction endpoint (all 12 formats + multi-column PDF)
+- `test_chunker.py` -- token-based chunking edge cases
+- `test_hashing.py` -- streaming SHA-256 + oversize abort
+- `test_search_aggregation.py` -- top-5 doc collapse by score-sum, empty results handling
