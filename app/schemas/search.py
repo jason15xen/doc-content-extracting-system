@@ -13,8 +13,6 @@ class SearchSource(BaseModel):
     doc_id: uuid.UUID
     doc_name: str
     score: float
-    snippet: str
-    chunk_indexes: list[int]
 
 
 class SearchResponse(BaseModel):

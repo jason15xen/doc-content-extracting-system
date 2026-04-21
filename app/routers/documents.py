@@ -58,6 +58,7 @@ async def upload_documents(
             raise HTTPException(status_code=404, detail="dataset not found")
 
     items: list[UploadAcceptedItem] = []
+    accepted_doc_ids: list[uuid.UUID] = []
     max_bytes = ctx.settings.max_upload_mb * 1024 * 1024
 
     for upload in files:
@@ -125,12 +126,6 @@ async def upload_documents(
             continue
         doc.storage_path = str(final_path)
 
-        task = await tasks_repo.create(
-            session,
-            task_type=TaskType.INGEST,
-            document_id=doc.id,
-            stage=PipelineStage.UPLOADED,
-        )
         try:
             await session.commit()
         except Exception as exc:
@@ -143,17 +138,28 @@ async def upload_documents(
             )
             continue
 
-        background.add_task(run_ingest_task, task.id)
+        accepted_doc_ids.append(doc.id)
         items.append(
             UploadAcceptedItem(
                 filename=filename,
                 status="accepted",
                 document_id=doc.id,
-                task_id=task.id,
             )
         )
 
-    return UploadResponse(items=items)
+    task_id: uuid.UUID | None = None
+    if accepted_doc_ids:
+        task = await tasks_repo.create(
+            session,
+            task_type=TaskType.INGEST,
+            stage=PipelineStage.UPLOADED,
+            total_items=len(accepted_doc_ids),
+        )
+        await session.commit()
+        task_id = task.id
+        background.add_task(run_ingest_task, task.id, accepted_doc_ids)
+
+    return UploadResponse(task_id=task_id, items=items)
 
 
 @router.get("", response_model=DocumentListOut)
@@ -187,7 +193,9 @@ async def delete_documents(
 ) -> DeleteAccepted:
     if not body.doc_ids:
         raise HTTPException(status_code=422, detail="doc_ids required")
-    task = await tasks_repo.create(session, task_type=TaskType.DELETE)
+    task = await tasks_repo.create(
+        session, task_type=TaskType.DELETE, total_items=len(body.doc_ids)
+    )
     await session.commit()
     background.add_task(run_delete_task, task.id, list(body.doc_ids))
     return DeleteAccepted(task_id=task.id)
@@ -201,7 +209,9 @@ async def delete_all_documents(
     doc_ids = await documents_repo.list_all_ids(session)
     if not doc_ids:
         raise HTTPException(status_code=404, detail="no documents to delete")
-    task = await tasks_repo.create(session, task_type=TaskType.DELETE)
+    task = await tasks_repo.create(
+        session, task_type=TaskType.DELETE, total_items=len(doc_ids)
+    )
     await session.commit()
     background.add_task(run_delete_task, task.id, doc_ids)
     return DeleteAccepted(task_id=task.id)

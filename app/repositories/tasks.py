@@ -15,16 +15,24 @@ async def create(
     document_id: uuid.UUID | None = None,
     status: TaskStatus = TaskStatus.QUEUED,
     stage: PipelineStage | None = None,
+    total_items: int = 1,
 ) -> Task:
     task = Task(
         task_type=task_type.value,
         document_id=document_id,
         status=status.value,
         stage=stage.value if stage else None,
+        total_items=total_items,
+        processed_items=0,
     )
     session.add(task)
     await session.flush()
     return task
+
+
+async def bump_processed(session: AsyncSession, task: Task, by: int = 1) -> None:
+    task.processed_items = (task.processed_items or 0) + by
+    task.updated_at = datetime.now(timezone.utc)
 
 
 async def get(session: AsyncSession, task_id: uuid.UUID) -> Task | None:

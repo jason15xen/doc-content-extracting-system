@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG API — Test UI</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #161a21;
+      --border: #252a33;
+      --text: #e6e8eb;
+      --muted: #8a93a0;
+      --accent: #4c9aff;
+      --accent-hover: #3a7fd9;
+      --ok: #37b86a;
+      --warn: #e3a73b;
+      --err: #e15a5a;
+      --code-bg: #0b0d11;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 12px; }
+    nav { display: flex; gap: 0; padding: 0 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+    nav button { background: transparent; border: none; color: var(--muted); padding: 12px 16px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; }
+    nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+    nav button:hover { color: var(--text); }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    section { display: none; }
+    section.active { display: block; }
+    h2 { margin: 0 0 16px; font-size: 15px; font-weight: 600; color: var(--text); }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    input[type="text"], input[type="number"], select, textarea {
+      width: 100%; background: var(--code-bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 10px; font: inherit; font-family: inherit;
+    }
+    textarea { min-height: 72px; resize: vertical; font-family: ui-monospace, monospace; font-size: 13px; }
+    input[type="file"] { width: 100%; background: var(--code-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+    input[type="file"]::file-selector-button { background: var(--accent); color: white; border: 0; padding: 6px 12px; border-radius: 4px; cursor: pointer; font: inherit; margin-right: 10px; }
+    input[type="file"]::file-selector-button:hover { background: var(--accent-hover); }
+    button.primary { background: var(--accent); color: white; border: 0; padding: 9px 16px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 500; }
+    button.primary:hover { background: var(--accent-hover); }
+    button.danger { background: transparent; color: var(--err); border: 1px solid var(--err); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+    button.danger:hover { background: var(--err); color: white; }
+    button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+    button.ghost:hover { border-color: var(--accent); }
+    .row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    .row > * { flex: 1; }
+    .row > .shrink { flex: 0 0 auto; }
+    .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+    .result { margin-top: 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow: auto; }
+    .result.ok { border-left: 3px solid var(--ok); }
+    .result.err { border-left: 3px solid var(--err); color: var(--err); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    td.mono { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+    .pill.queued { background: #2a2f38; color: var(--muted); }
+    .pill.running { background: #253544; color: var(--accent); }
+    .pill.success { background: #1e3a2a; color: var(--ok); }
+    .pill.failed { background: #3a1e1e; color: var(--err); }
+    .pill.pending { background: #2a2f38; color: var(--muted); }
+    .pill.processing { background: #253544; color: var(--accent); }
+    .progress { display: flex; align-items: center; gap: 8px; }
+    .progress-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); transition: width .3s; }
+    .progress-fill.success { background: var(--ok); }
+    .progress-fill.failed { background: var(--err); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .summary { display: flex; gap: 18px; margin-top: 8px; font-size: 13px; }
+    .summary span strong { color: var(--text); font-weight: 600; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .search-answer { background: #172030; border: 1px solid #253544; padding: 14px; border-radius: 6px; line-height: 1.6; white-space: pre-wrap; margin-bottom: 12px; }
+    .empty { text-align: center; color: var(--muted); padding: 32px; font-style: italic; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>RAG API Test UI</h1>
+  <span class="sub">for development / manual verification</span>
+</header>
+
+<nav id="nav">
+  <button data-tab="upload" class="active">Upload</button>
+  <button data-tab="search">Search</button>
+  <button data-tab="documents">Documents</button>
+  <button data-tab="datasets">Datasets</button>
+  <button data-tab="tasks">Tasks</button>
+  <button data-tab="admin">Admin</button>
+</nav>
+
+<main>
+
+  <!-- UPLOAD -->
+  <section id="tab-upload" class="active">
+    <h2>Upload documents</h2>
+    <div class="panel">
+      <div class="row">
+        <div style="flex: 2">
+          <label>Files (select multiple with Ctrl/Cmd-click or Shift-click)</label>
+          <input type="file" id="upload-files" multiple />
+          <div class="hint" id="upload-hint">No files selected</div>
+        </div>
+        <div>
+          <label>Dataset (optional)</label>
+          <select id="upload-dataset"><option value="">— none —</option></select>
+        </div>
+        <div class="shrink" style="align-self: flex-end">
+          <button class="primary" onclick="uploadFiles()">Upload</button>
+        </div>
+      </div>
+      <div id="upload-result" class="result" style="display:none"></div>
+      <div id="upload-task-progress" style="display:none; margin-top: 12px;"></div>
+    </div>
+  </section>
+
+  <!-- SEARCH -->
+  <section id="tab-search">
+    <h2>Search</h2>
+    <div class="panel">
+      <div class="row">
+        <div style="flex: 3">
+          <label>Query</label>
+          <textarea id="search-query" placeholder="Ask a question about your documents…"></textarea>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Dataset (optional — omit to search all)</label>
+          <select id="search-dataset"><option value="">— all datasets —</option></select>
+        </div>
+        <div>
+          <label>Top K (max sources)</label>
+          <input type="number" id="search-topk" value="5" min="1" max="20" />
+        </div>
+        <div class="shrink" style="align-self: flex-end">
+          <button class="primary" onclick="doSearch()">Search</button>
+        </div>
+      </div>
+    </div>
+    <div id="search-output" style="display:none">
+      <h2>Answer</h2>
+      <div id="search-answer" class="search-answer"></div>
+      <h2>Sources</h2>
+      <div class="panel" id="search-sources"></div>
+    </div>
+  </section>
+
+  <!-- DOCUMENTS -->
+  <section id="tab-documents">
+    <h2>Documents</h2>
+    <div class="panel">
+      <div class="toolbar">
+        <div>
+          <button class="ghost" onclick="loadDocuments()">Refresh</button>
+        </div>
+        <div>
+          <button class="danger" onclick="deleteAllDocuments()">Delete all</button>
+        </div>
+      </div>
+      <div id="documents-table"></div>
+    </div>
+  </section>
+
+  <!-- DATASETS -->
+  <section id="tab-datasets">
+    <h2>Datasets</h2>
+    <div class="panel">
+      <div class="row">
+        <div><label>Name</label><input type="text" id="dataset-name" placeholder="my-corpus" /></div>
+        <div style="flex: 2"><label>Description (optional)</label><input type="text" id="dataset-desc" /></div>
+        <div class="shrink" style="align-self: flex-end">
+          <button class="primary" onclick="createDataset()">Create</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="toolbar">
+        <span class="muted">Existing datasets</span>
+        <button class="ghost" onclick="loadDatasets()">Refresh</button>
+      </div>
+      <div id="datasets-table"></div>
+    </div>
+  </section>
+
+  <!-- TASKS -->
+  <section id="tab-tasks">
+    <h2>Tasks</h2>
+    <div class="panel">
+      <div class="toolbar">
+        <div>
+          <label style="display:inline">Auto-refresh</label>
+          <input type="checkbox" id="tasks-auto" checked />
+          <button class="ghost" onclick="loadTasks()">Refresh now</button>
+        </div>
+        <div>
+          <button class="danger" onclick="deleteAllTasks()">Delete all tasks</button>
+        </div>
+      </div>
+      <div id="tasks-table"></div>
+    </div>
+  </section>
+
+  <!-- ADMIN -->
+  <section id="tab-admin">
+    <h2>Admin</h2>
+    <div class="panel">
+      <div class="row">
+        <div>
+          <strong>Clean orphan files</strong>
+          <div class="hint">Delete files on disk that have no matching DB record.</div>
+        </div>
+        <div class="shrink" style="align-self: center">
+          <button class="primary" onclick="adminCleanup('orphan-files')">Run</button>
+        </div>
+      </div>
+      <div id="admin-files-result"></div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <div>
+          <strong>Clean orphan Azure AI Search chunks</strong>
+          <div class="hint">Delete AI Search documents whose doc_id no longer exists in the DB.</div>
+        </div>
+        <div class="shrink" style="align-self: center">
+          <button class="primary" onclick="adminCleanup('orphan-index')">Run</button>
+        </div>
+      </div>
+      <div id="admin-index-result"></div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const API = ''; // same origin
+
+// --- tab switching ---
+document.querySelectorAll('#nav button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('section').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('tab-' + b.dataset.tab).classList.add('active');
+    if (b.dataset.tab === 'documents') loadDocuments();
+    if (b.dataset.tab === 'datasets') loadDatasets();
+    if (b.dataset.tab === 'tasks') loadTasks();
+  });
+});
+
+// --- helpers ---
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function showResult(el, data, ok = true) {
+  el.style.display = 'block';
+  el.className = 'result ' + (ok ? 'ok' : 'err');
+  el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, opts);
+  const txt = await r.text();
+  let body = txt;
+  try { body = JSON.parse(txt); } catch {}
+  if (!r.ok) throw { status: r.status, body };
+  return body;
+}
+
+// --- upload ---
+$('upload-files').addEventListener('change', e => {
+  const n = e.target.files.length;
+  $('upload-hint').textContent = n === 0 ? 'No files selected' : `${n} file${n>1?'s':''} selected: ` + Array.from(e.target.files).map(f => f.name).join(', ');
+});
+
+async function uploadFiles() {
+  const files = $('upload-files').files;
+  if (!files.length) { alert('Select at least one file'); return; }
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  const ds = $('upload-dataset').value;
+  if (ds) fd.append('dataset_id', ds);
+
+  const resultEl = $('upload-result');
+  resultEl.style.display = 'block';
+  resultEl.className = 'result';
+  resultEl.textContent = 'Uploading…';
+
+  try {
+    const resp = await api('/documents/upload', { method: 'POST', body: fd });
+    showResult(resultEl, resp, true);
+    if (resp.task_id) {
+      pollUploadTask(resp.task_id);
+    }
+  } catch (e) {
+    showResult(resultEl, e.body || String(e), false);
+  }
+}
+
+async function pollUploadTask(taskId) {
+  const box = $('upload-task-progress');
+  box.style.display = 'block';
+  const doPoll = async () => {
+    try {
+      const t = await api('/tasks/' + taskId);
+      const pct = t.progress || 0;
+      const klass = t.status === 'success' ? 'success' : t.status === 'failed' ? 'failed' : '';
+      box.innerHTML = `
+        <div class="progress">
+          <span class="pill ${t.status}">${t.status}</span>
+          <div class="progress-bar"><div class="progress-fill ${klass}" style="width:${pct}%"></div></div>
+          <span class="muted">${pct}% · ${esc(t.result || '')}</span>
+        </div>
+        <div class="muted" style="margin-top:6px">elapsed: ${t.processed_time}s · task: <code>${taskId}</code></div>
+      `;
+      if (t.status !== 'running' && t.status !== 'queued') return;
+      setTimeout(doPoll, 1500);
+    } catch (e) {
+      box.innerHTML = `<div class="result err">poll failed: ${esc(e.body ? JSON.stringify(e.body) : String(e))}</div>`;
+    }
+  };
+  doPoll();
+}
+
+// --- search ---
+async function doSearch() {
+  const query = $('search-query').value.trim();
+  if (!query) { alert('Enter a query'); return; }
+  const body = { query, top_k: parseInt($('search-topk').value, 10) || 5 };
+  const ds = $('search-dataset').value;
+  if (ds) body.dataset_id = ds;
+
+  $('search-output').style.display = 'block';
+  $('search-answer').textContent = 'Searching…';
+  $('search-sources').innerHTML = '';
+
+  try {
+    const resp = await api('/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    $('search-answer').textContent = resp.answer || '(no answer)';
+    if (!resp.sources || !resp.sources.length) {
+      $('search-sources').innerHTML = '<div class="empty">No sources.</div>';
+      return;
+    }
+    $('search-sources').innerHTML = `
+      <table>
+        <thead><tr><th>#</th><th>Document</th><th>Score</th><th>doc_id</th></tr></thead>
+        <tbody>
+          ${resp.sources.map((s, i) => `
+            <tr>
+              <td>${i+1}</td>
+              <td>${esc(s.doc_name)}</td>
+              <td>${(+s.score).toFixed(3)}</td>
+              <td class="mono">${s.doc_id}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch (e) {
+    $('search-answer').textContent = '';
+    $('search-sources').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+  }
+}
+
+// --- datasets ---
+async function loadDatasets() {
+  try {
+    const rows = await api('/datasets');
+    // populate dropdowns too
+    const opts = ['<option value="">— none —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`));
+    $('upload-dataset').innerHTML = opts.join('');
+    $('search-dataset').innerHTML = ['<option value="">— all datasets —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`)).join('');
+    if (!rows.length) { $('datasets-table').innerHTML = '<div class="empty">No datasets yet.</div>'; return; }
+    $('datasets-table').innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Description</th><th>Created</th><th>ID</th><th></th></tr></thead>
+        <tbody>${rows.map(d => `
+          <tr>
+            <td>${esc(d.name)}</td>
+            <td>${esc(d.description || '')}</td>
+            <td class="muted">${new Date(d.created_at).toLocaleString()}</td>
+            <td class="mono">${d.id}</td>
+            <td><button class="danger" onclick="deleteDataset('${d.id}', '${esc(d.name)}')">Delete</button></td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+  } catch (e) {
+    $('datasets-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+  }
+}
+async function createDataset() {
+  const name = $('dataset-name').value.trim();
+  if (!name) { alert('Name required'); return; }
+  const description = $('dataset-desc').value.trim() || null;
+  try {
+    await api('/datasets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    });
+    $('dataset-name').value = ''; $('dataset-desc').value = '';
+    loadDatasets();
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function deleteDataset(id, name) {
+  if (!confirm(`Delete dataset "${name}" and cascade-delete all its documents?`)) return;
+  try {
+    await api('/datasets/' + id, { method: 'DELETE' });
+    loadDatasets();
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+
+// --- documents ---
+async function loadDocuments() {
+  try {
+    const resp = await api('/documents?limit=100');
+    if (!resp.items.length) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
+    $('documents-table').innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Chunks</th><th>Dataset</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
+        <tbody>${resp.items.map(d => `
+          <tr>
+            <td>${esc(d.name)}</td>
+            <td><span class="pill ${d.status}">${d.status}</span></td>
+            <td>${d.chunk_count}</td>
+            <td class="mono">${d.dataset_id || '—'}</td>
+            <td class="muted">${new Date(d.uploaded_at).toLocaleString()}</td>
+            <td class="mono">${d.id}</td>
+            <td><button class="danger" onclick="deleteDoc('${d.id}')">Delete</button></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      <div class="muted" style="margin-top:8px">${resp.items.length} of ${resp.meta.total} total</div>`;
+  } catch (e) {
+    $('documents-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+  }
+}
+async function deleteDoc(id) {
+  if (!confirm('Delete this document?')) return;
+  try {
+    await api('/documents', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ doc_ids: [id] }),
+    });
+    setTimeout(loadDocuments, 400);
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function deleteAllDocuments() {
+  if (!confirm('Delete ALL documents? This also removes chunks from Azure AI Search.')) return;
+  try {
+    await api('/documents/all', { method: 'DELETE' });
+    setTimeout(loadDocuments, 400);
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+
+// --- tasks ---
+let tasksTimer = null;
+async function loadTasks() {
+  try {
+    const resp = await api('/tasks?limit=50');
+    if (!resp.items.length) { $('tasks-table').innerHTML = '<div class="empty">No tasks.</div>'; return; }
+    $('tasks-table').innerHTML = `
+      <table>
+        <thead><tr><th>Type</th><th>Status</th><th>Progress</th><th>Result</th><th>Time</th><th>Created</th><th>ID</th><th></th></tr></thead>
+        <tbody>${resp.items.map(t => {
+          const pct = t.progress || 0;
+          const klass = t.status === 'success' ? 'success' : t.status === 'failed' ? 'failed' : '';
+          return `
+          <tr>
+            <td>${esc(t.task_type)}</td>
+            <td><span class="pill ${t.status}">${t.status}</span></td>
+            <td style="min-width: 200px">
+              <div class="progress">
+                <div class="progress-bar"><div class="progress-fill ${klass}" style="width:${pct}%"></div></div>
+                <span class="muted" style="min-width:44px">${pct}%</span>
+              </div>
+              <div class="muted" style="font-size:11px">${t.processed_items}/${t.total_items} items</div>
+            </td>
+            <td class="muted">${esc(t.result || '')}</td>
+            <td class="muted">${t.processed_time}s</td>
+            <td class="muted">${new Date(t.created_at).toLocaleTimeString()}</td>
+            <td class="mono">${t.id.slice(0, 8)}…</td>
+            <td><button class="danger" onclick="deleteTask('${t.id}')">Delete</button></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  } catch (e) {
+    $('tasks-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+  }
+}
+async function deleteTask(id) {
+  try { await api('/tasks/' + id, { method: 'DELETE' }); loadTasks(); }
+  catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function deleteAllTasks() {
+  if (!confirm('Delete ALL task records?')) return;
+  try { await api('/tasks', { method: 'DELETE' }); loadTasks(); }
+  catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+function setupTasksAutoRefresh() {
+  clearInterval(tasksTimer);
+  tasksTimer = setInterval(() => {
+    if ($('tasks-auto').checked && document.getElementById('tab-tasks').classList.contains('active')) {
+      loadTasks();
+    }
+  }, 2000);
+}
+setupTasksAutoRefresh();
+
+// --- admin ---
+async function adminCleanup(kind) {
+  const elId = kind === 'orphan-files' ? 'admin-files-result' : 'admin-index-result';
+  const el = $(elId);
+  el.innerHTML = '<div class="result">running…</div>';
+  try {
+    const r = await api('/admin/cleanup/' + kind, { method: 'POST' });
+    el.innerHTML = `<div class="result ok">${esc(JSON.stringify(r, null, 2))}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+  }
+}
+
+// --- initial load ---
+loadDatasets();
+</script>
+
+</body>
+</html>

@@ -1,8 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import FileResponse
 
 from app.db.session import build_engine, build_sessionmaker
 from app.pipeline import context as pipeline_context
@@ -69,7 +72,35 @@ async def lifespan(app: FastAPI):
         pipeline_context.clear_context()
 
 
-app = FastAPI(title="RAG Ingestion & Search API", lifespan=lifespan)
+app = FastAPI(
+    title="RAG Ingestion & Search API",
+    lifespan=lifespan,
+    docs_url=None,  # replaced below with a CDN-served newer Swagger UI
+)
+
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/ui", include_in_schema=False)
+async def test_ui():
+    """Developer-friendly test UI with native multi-file upload, task
+    progress tracking, dataset management, and a search form."""
+    return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    """Override the bundled Swagger UI with a recent CDN version that renders
+    ``array<file>`` as a single multi-select file picker instead of one picker
+    per array item."""
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url or "/openapi.json",
+        title=f"{app.title} - Swagger UI",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css",
+    )
+
 
 app.include_router(health.router)
 app.include_router(extract.router)

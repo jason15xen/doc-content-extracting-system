@@ -9,10 +9,10 @@ class UploadAcceptedItem(BaseModel):
     status: Literal["accepted", "failed"]
     reason: str | None = None
     document_id: uuid.UUID | None = None
-    task_id: uuid.UUID | None = None
 
 
 class UploadResponse(BaseModel):
+    task_id: uuid.UUID | None = None  # null when every file failed validation
     items: list[UploadAcceptedItem]
 
     @computed_field  # type: ignore[prop-decorator]

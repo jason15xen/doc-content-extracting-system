@@ -95,18 +95,13 @@ async def search(
 
     answer = await chatter.answer(body.query, contexts)
 
-    sources: list[SearchSource] = []
-    for did in ranked_doc_ids:
-        chunks = sorted(by_doc[did]["chunks"], key=lambda c: c["score"], reverse=True)
-        snippet = (chunks[0]["content"] or "")[:300] if chunks else ""
-        sources.append(
-            SearchSource(
-                doc_id=uuid.UUID(did),
-                doc_name=by_doc[did]["doc_name"],
-                score=float(by_doc[did]["score_sum"]),
-                snippet=snippet,
-                chunk_indexes=sorted({c["chunk_index"] for c in chunks}),
-            )
+    sources = [
+        SearchSource(
+            doc_id=uuid.UUID(did),
+            doc_name=by_doc[did]["doc_name"],
+            score=float(by_doc[did]["score_sum"]),
         )
+        for did in ranked_doc_ids
+    ]
 
     return SearchResponse(answer=answer, sources=sources)

@@ -113,6 +113,8 @@ class Task(Base):
     task_type: Mapped[str] = mapped_column(nullable=False)
     status: Mapped[str] = mapped_column(nullable=False, default=TaskStatus.QUEUED.value)
     stage: Mapped[str | None] = mapped_column(nullable=True)
+    total_items: Mapped[int] = mapped_column(nullable=False, default=1)
+    processed_items: Mapped[int] = mapped_column(nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
