@@ -53,6 +53,8 @@ docker-image/
 # Runtime storage
 storage/uploads/*
 !storage/uploads/.gitkeep
+storage/logs/*
+!storage/logs/.gitkeep
 
 # SQLite database (incl. WAL/SHM sidecars)
 db/*.db

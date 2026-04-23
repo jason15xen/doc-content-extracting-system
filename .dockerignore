@@ -13,3 +13,4 @@ tests
 .env
 storage
 db
+logs
