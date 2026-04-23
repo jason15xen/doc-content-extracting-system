@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from app.repositories import tasks as tasks_repo
 from app.routers import admin, datasets, documents, extract, health, search, tasks
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
+from app.services.logging_setup import setup_file_logging
 from app.services.search_index import SearchGateway
 from app.settings import get_settings
 
@@ -23,6 +25,13 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     try:
         settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        setup_file_logging(settings.logs_dir)
+        logging.getLogger("app").info(
+            "file logging initialized at %s", settings.logs_dir
+        )
     except OSError:
         pass
 

@@ -11,7 +11,7 @@ IMAGE_TAG    ?= latest
 
 help:
 	@echo "Targets:"
-	@echo "  up        Start local stack (postgres + api)"
+	@echo "  up        Start the api (uses local SQLite at ./db/rag.db)"
 	@echo "  down      Stop local stack"
 	@echo "  build     Build api image as $$ACR_REGISTRY/rag-for-2tb:$$IMAGE_TAG"
 	@echo "  push      Push built api image to ACR (requires az acr login first)"

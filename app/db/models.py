@@ -1,12 +1,16 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, Index, func, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.db.types import UTCDateTime
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class DocumentStatus(str, enum.Enum):
@@ -41,13 +45,15 @@ class PipelineStage(str, enum.Enum):
 class Dataset(Base):
     __tablename__ = "datasets"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
 
     documents: Mapped[list["Document"]] = relationship(back_populates="dataset")
 
@@ -63,17 +69,17 @@ class Document(Base):
         Index("idx_documents_status", "status"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(nullable=False)
     hash: Mapped[str] = mapped_column(unique=True, nullable=False)
     dataset_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("datasets.id", ondelete="SET NULL"),
         nullable=True,
     )
-    uploaded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow
+    )
     status: Mapped[str] = mapped_column(nullable=False, default=DocumentStatus.PENDING.value)
     storage_path: Mapped[str | None] = mapped_column(nullable=True)
     chunk_count: Mapped[int] = mapped_column(nullable=False, default=0)
@@ -102,11 +108,9 @@ class Task(Base):
         Index("idx_tasks_created_at", "created_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=True,
     )
@@ -116,7 +120,11 @@ class Task(Base):
     total_items: Mapped[int] = mapped_column(nullable=False, default=1)
     processed_items: Mapped[int] = mapped_column(nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
 
     document: Mapped[Document | None] = relationship(back_populates="tasks")

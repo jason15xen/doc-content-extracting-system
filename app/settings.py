@@ -14,9 +14,7 @@ class Settings(BaseSettings):
     )
 
     # ---- Database ----
-    database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@postgres:5432/rag"
-    )
+    database_url: str = Field(default="sqlite+aiosqlite:///./db/rag.db")
 
     # ---- Local file storage ----
     storage_dir: Path = Field(default=Path("./storage"))
@@ -59,6 +57,10 @@ class Settings(BaseSettings):
     @property
     def uploads_dir(self) -> Path:
         return self.storage_dir / "uploads"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.storage_dir / "logs"
 
     @property
     def effective_embedding_endpoint(self) -> str:

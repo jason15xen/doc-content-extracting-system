@@ -54,6 +54,11 @@ docker-image/
 storage/uploads/*
 !storage/uploads/.gitkeep
 
+# SQLite database (incl. WAL/SHM sidecars)
+db/*.db
+db/*.db-*
+!db/.gitkeep
+
 # Type checkers
 .mypy_cache/
 .ruff_cache/

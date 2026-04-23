@@ -38,5 +38,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("tasks", "processed_items")
-    op.drop_column("tasks", "total_items")
+    with op.batch_alter_table("tasks") as batch_op:
+        batch_op.drop_column("processed_items")
+        batch_op.drop_column("total_items")
