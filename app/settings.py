@@ -59,6 +59,10 @@ class Settings(BaseSettings):
         return self.storage_dir / "uploads"
 
     @property
+    def logs_dir(self) -> Path:
+        return self.storage_dir / "logs"
+
+    @property
     def effective_embedding_endpoint(self) -> str:
         return self.azure_openai_embedding_endpoint or self.azure_openai_endpoint
 

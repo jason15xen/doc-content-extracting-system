@@ -93,6 +93,7 @@
   <button data-tab="documents">Documents</button>
   <button data-tab="datasets">Datasets</button>
   <button data-tab="tasks">Tasks</button>
+  <button data-tab="logs">Logs</button>
   <button data-tab="admin">Admin</button>
 </nav>
 
@@ -208,6 +209,18 @@
     </div>
   </section>
 
+  <!-- LOGS -->
+  <section id="tab-logs">
+    <h2>Server logs</h2>
+    <div class="panel">
+      <div class="toolbar">
+        <span class="muted">Files in ./storage/logs — app.txt is current day; dated files are rotated.</span>
+        <button class="ghost" onclick="loadLogs()">Refresh</button>
+      </div>
+      <div id="logs-table"></div>
+    </div>
+  </section>
+
   <!-- ADMIN -->
   <section id="tab-admin">
     <h2>Admin</h2>
@@ -252,6 +265,7 @@ document.querySelectorAll('#nav button').forEach(b => {
     if (b.dataset.tab === 'documents') loadDocuments();
     if (b.dataset.tab === 'datasets') loadDatasets();
     if (b.dataset.tab === 'tasks') loadTasks();
+    if (b.dataset.tab === 'logs') loadLogs();
   });
 });
 
@@ -514,6 +528,37 @@ function setupTasksAutoRefresh() {
   }, 2000);
 }
 setupTasksAutoRefresh();
+
+// --- logs ---
+function humanSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+async function loadLogs() {
+  try {
+    const rows = await api('/admin/logs');
+    if (!rows.length) {
+      $('logs-table').innerHTML = '<div class="empty">No log files yet. Send some traffic and refresh.</div>';
+      return;
+    }
+    $('logs-table').innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Size</th><th>Modified (UTC)</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `
+          <tr>
+            <td>${esc(r.name)}</td>
+            <td>${humanSize(r.size_bytes)}</td>
+            <td class="muted">${new Date(r.modified_at).toLocaleString()}</td>
+            <td><a class="ghost" style="text-decoration:none" href="/admin/logs/${encodeURIComponent(r.name)}" download>Download</a></td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+  } catch (e) {
+    $('logs-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+  }
+}
 
 // --- admin ---
 async function adminCleanup(kind) {

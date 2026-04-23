@@ -21,7 +21,7 @@ COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 COPY scripts ./scripts
-RUN mkdir -p /srv/storage/uploads /srv/db && chmod +x /srv/scripts/entrypoint.sh
+RUN mkdir -p /srv/storage/uploads /srv/storage/logs /srv/db && chmod +x /srv/scripts/entrypoint.sh
 
 EXPOSE 8889
 
