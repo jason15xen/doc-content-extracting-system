@@ -15,7 +15,7 @@ A FastAPI service that ingests documents, extracts text, chunks and embeds them 
   + SHA-256 hash   (12 formats)     800 tok / 100 overlap  text-embedding-3-small
        │                                                        │
        ▼                                                        ▼
-  PostgreSQL                                              Azure AI Search
+  SQLite (./db/rag.db)                                    Azure AI Search
   (documents, tasks, datasets)                            (hybrid: vector + BM25)
                                                                 │
                                                     POST /search│
@@ -67,8 +67,7 @@ docker compose up --build
 ```
 
 This starts:
-- **PostgreSQL** (port 5432, internal) -- document/task/dataset metadata
-- **API** (port 8889) -- FastAPI with Alembic migration on boot
+- **API** (port 8889) -- FastAPI with Alembic migration on boot. Metadata lives in a local SQLite file at `./db/rag.db` (bind-mounted to `/srv/db/rag.db` inside the container).
 
 ### 3. Use
 
@@ -231,8 +230,8 @@ Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor pr
 | id | UUID PK |
 | name | TEXT UNIQUE |
 | description | TEXT |
-| created_at | TIMESTAMPTZ |
-| updated_at | TIMESTAMPTZ |
+| created_at | DATETIME (UTC) |
+| updated_at | DATETIME (UTC) |
 
 ### documents
 | Column | Type |
@@ -241,7 +240,7 @@ Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor pr
 | name | TEXT (original filename) |
 | hash | CHAR(64) UNIQUE (SHA-256) |
 | dataset_id | UUID FK (nullable) |
-| uploaded_at | TIMESTAMPTZ |
+| uploaded_at | DATETIME (UTC) |
 | status | pending / processing / success / failed |
 | storage_path | TEXT (null after success) |
 | chunk_count | INTEGER |
@@ -255,8 +254,8 @@ Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor pr
 | status | queued / running / success / failed |
 | stage | uploaded / extracted / chunked / embedded / indexed / deleted |
 | error_message | TEXT |
-| created_at | TIMESTAMPTZ |
-| updated_at | TIMESTAMPTZ |
+| created_at | DATETIME (UTC) |
+| updated_at | DATETIME (UTC) |
 
 ## Azure AI Search index
 
@@ -323,7 +322,7 @@ app/
     admin.py                   Orphan file/index cleanup
 migrations/                    Alembic (auto-run on boot via entrypoint)
 scripts/entrypoint.sh          alembic upgrade head + uvicorn
-docker-compose.yml             API + PostgreSQL
+docker-compose.yml             API (SQLite at ./db/rag.db, no external DB service)
 Dockerfile
 index.json                     Azure AI Search index schema (reference)
 ```

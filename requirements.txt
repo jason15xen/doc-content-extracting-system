@@ -9,7 +9,7 @@ pymupdf4llm
 
 pydantic-settings
 sqlalchemy>=2.0
-asyncpg
+aiosqlite
 alembic
 azure-search-documents>=11.5.0
 aiohttp

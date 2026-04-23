@@ -14,9 +14,7 @@ class Settings(BaseSettings):
     )
 
     # ---- Database ----
-    database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@postgres:5432/rag"
-    )
+    database_url: str = Field(default="sqlite+aiosqlite:///./db/rag.db")
 
     # ---- Local file storage ----
     storage_dir: Path = Field(default=Path("./storage"))

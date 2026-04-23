@@ -1,32 +1,12 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: rag-for-2tb-postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-rag}
-    volumes:
-      - rag_2tb_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-rag}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    # Pushes to the shared Azure Container Registry `acraianalytic.azurecr.io`
-    # (same registry used by the hybrid-rag-pdf project). Override with env vars
-    # if needed:
+    # Override with env vars to push to a different ACR / tag:
     #   ACR_REGISTRY=other.azurecr.io IMAGE_TAG=v2 docker compose build api
-    image: acraianalytic.azurecr.io/rag-for-2tb:latest
+    image: ${ACR_REGISTRY:-acraianalytic.azurecr.io}/rag-for-2tb:${IMAGE_TAG:-latest}
     container_name: rag-for-2tb
-    depends_on:
-      postgres:
-        condition: service_healthy
     env_file:
       - path: .env
         required: false
@@ -36,6 +16,4 @@ services:
       - "8889:8889"
     volumes:
       - ./storage:/srv/storage
-
-volumes:
-  rag_2tb_pgdata:
+      - ./db:/srv/db

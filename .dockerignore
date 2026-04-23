@@ -12,3 +12,4 @@ tests
 .DS_Store
 .env
 storage
+db
