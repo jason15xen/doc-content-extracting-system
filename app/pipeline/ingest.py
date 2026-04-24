@@ -37,53 +37,82 @@ async def _run(
     failed_ids: list[str] = []
     failed_lock = asyncio.Lock()
 
+    async def record_failure(doc_id: uuid.UUID, exc: BaseException) -> None:
+        async with failed_lock:
+            failed_ids.append(f"{doc_id}:{type(exc).__name__}")
+
     async def process_one(doc_id: uuid.UUID) -> None:
         # The shared ingest_semaphore governs GLOBAL concurrency across all
         # in-flight tasks (not just this request's docs), so the Azure OpenAI
         # / Azure Search / CPU load stays bounded regardless of how many
         # upload requests arrive in parallel.
-        async with ctx.ingest_semaphore:
-            # Each doc gets its own DB session — SQLAlchemy async sessions
-            # are NOT safe to share across concurrent coroutines.
-            async with ctx.sessionmaker() as sess:
-                try:
-                    await _ingest_one(ctx, sess, task_id, doc_id)
-                except Exception as exc:
-                    async with failed_lock:
-                        failed_ids.append(f"{doc_id}:{type(exc).__name__}")
+        try:
+            async with ctx.ingest_semaphore:
+                # Each doc gets its own DB session — SQLAlchemy async sessions
+                # are NOT safe to share across concurrent coroutines.
+                async with ctx.sessionmaker() as sess:
+                    try:
+                        await _ingest_one(ctx, sess, task_id, doc_id)
+                    except Exception as exc:
+                        # Clear any partial transaction state so the context
+                        # manager's close() doesn't raise PendingRollbackError.
+                        try:
+                            await sess.rollback()
+                        except Exception:
+                            pass
+                        await record_failure(doc_id, exc)
+        except Exception as exc:
+            # Session/semaphore acquisition itself blew up — still record it.
+            await record_failure(doc_id, exc)
 
         # Progress bump runs on its own short session after the doc pipeline
-        # has released its session. Using a fresh session keeps this simple
-        # and race-free under WAL mode.
-        async with ctx.sessionmaker() as ps:
-            pt = await tasks_repo.get(ps, task_id)
-            if pt is not None:
-                await tasks_repo.bump_processed(ps, pt)
-                await ps.commit()
+        # has released its session. Never let a failed bump kill the pipeline
+        # — the worst case is a slightly stale processed_items counter, and
+        # the finalize block below will still run.
+        try:
+            async with ctx.sessionmaker() as ps:
+                pt = await tasks_repo.get(ps, task_id)
+                if pt is not None:
+                    await tasks_repo.bump_processed(ps, pt)
+                    await ps.commit()
+        except Exception:
+            pass
 
-    await asyncio.gather(*(process_one(d) for d in doc_ids))
-
-    # Finalize task status
-    async with ctx.sessionmaker() as session:
-        task = await tasks_repo.get(session, task_id)
-        if task is None:
-            return
-        if failed_ids:
-            await tasks_repo.update_stage_status(
-                session,
-                task,
-                stage=PipelineStage.INDEXED,
-                status=TaskStatus.FAILED,
-                error_message="; ".join(failed_ids)[:2000],
-            )
-        else:
-            await tasks_repo.update_stage_status(
-                session,
-                task,
-                stage=PipelineStage.INDEXED,
-                status=TaskStatus.SUCCESS,
-            )
-        await session.commit()
+    try:
+        # return_exceptions=True guarantees gather waits for every doc and
+        # surfaces no exception — finalization below always runs.
+        await asyncio.gather(
+            *(process_one(d) for d in doc_ids), return_exceptions=True
+        )
+    finally:
+        # Finalize task status. Wrapped so that no matter what happened
+        # above, the task never stays stuck in RUNNING.
+        try:
+            async with ctx.sessionmaker() as session:
+                task = await tasks_repo.get(session, task_id)
+                if task is not None:
+                    if failed_ids:
+                        await tasks_repo.update_stage_status(
+                            session,
+                            task,
+                            stage=PipelineStage.INDEXED,
+                            status=TaskStatus.FAILED,
+                            error_message="; ".join(failed_ids)[:2000],
+                        )
+                    else:
+                        await tasks_repo.update_stage_status(
+                            session,
+                            task,
+                            stage=PipelineStage.INDEXED,
+                            status=TaskStatus.SUCCESS,
+                        )
+                    await session.commit()
+        except Exception:
+            # Last resort — swallow so the background task doesn't die with
+            # an unhandled exception. The task row may remain in RUNNING in
+            # this extreme case, but reconcile_running_tasks sweeps it on
+            # the next boot.
+            pass
 
 
 async def _ingest_one(
