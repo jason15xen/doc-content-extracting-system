@@ -1,3 +1,5 @@
+import asyncio
+
 from openai import APIConnectionError, AsyncAzureOpenAI, RateLimitError
 from tenacity import (
     retry,
@@ -8,6 +10,8 @@ from tenacity import (
 
 from app.errors import EmbeddingError
 from app.settings import Settings
+
+_MAX_INFLIGHT_BATCHES = 4
 
 
 class Embedder:
@@ -23,14 +27,26 @@ class Embedder:
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        out: list[list[float]] = []
-        for i in range(0, len(texts), self._batch_size):
-            batch = texts[i : i + self._batch_size]
-            vectors = await self._embed_batch(batch)
+
+        batches = [
+            texts[i : i + self._batch_size]
+            for i in range(0, len(texts), self._batch_size)
+        ]
+        # Cap concurrent batches per call to avoid overwhelming the TPM quota.
+        sem = asyncio.Semaphore(_MAX_INFLIGHT_BATCHES)
+
+        async def run(batch: list[str]) -> list[list[float]]:
+            async with sem:
+                vectors = await self._embed_batch(batch)
             if len(vectors) != len(batch):
                 raise EmbeddingError(
                     f"expected {len(batch)} embeddings, got {len(vectors)}"
                 )
+            return vectors
+
+        batch_results = await asyncio.gather(*(run(b) for b in batches))
+        out: list[list[float]] = []
+        for vectors in batch_results:
             out.extend(vectors)
         return out
 
