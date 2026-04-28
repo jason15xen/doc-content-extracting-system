@@ -97,12 +97,6 @@ def setup_file_logging(logs_dir: Path, level: int = logging.INFO) -> None:
 
     # Silence noisy per-request INFO logs from Azure and httpx. Every HTTP
     # call dumps ~12 lines of headers each otherwise, which drowns the log
-    # file and slows writes during heavy ingest.
-    for noisy in (
-        "azure.core.pipeline.policies.http_logging_policy",
-        "azure",
-        "httpx",
-        "httpcore",
-        "openai",
-    ):
+    # file. The `azure` parent covers all azure.* children via inheritance.
+    for noisy in ("azure", "httpx", "httpcore", "openai"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

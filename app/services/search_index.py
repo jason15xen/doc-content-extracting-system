@@ -138,6 +138,12 @@ class SearchGateway:
         self._enable_semantic = settings.enable_semantic_ranking
         self._search_client: SearchClient | None = None
         self._index_client: SearchIndexClient | None = None
+        # Process-wide cap on concurrent upload batches. A per-call
+        # semaphore would let N parallel ingest tasks each spin up their
+        # own pool, multiplying the actual in-flight count by N.
+        self._upload_sem = asyncio.Semaphore(
+            settings.search_max_inflight_uploads
+        )
 
     def _search(self) -> SearchClient:
         if self._search_client is None:
@@ -167,10 +173,9 @@ class SearchGateway:
             docs[i : i + self.UPLOAD_BATCH]
             for i in range(0, len(docs), self.UPLOAD_BATCH)
         ]
-        sem = asyncio.Semaphore(4)
 
         async def upload(batch: list[dict[str, Any]]) -> None:
-            async with sem:
+            async with self._upload_sem:
                 results = await client.upload_documents(documents=batch)
             failures = [r for r in results if not r.succeeded]
             if failures:

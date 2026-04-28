@@ -1,4 +1,4 @@
-"""Tests the top-5 distinct-doc collapse + score-sum ordering logic in /search.
+"""Tests the top-5 distinct-doc collapse + score-max ordering logic in /search.
 
 We swap in stub Embedder / SearchGateway / Chatter / session-dependency and drive
 the endpoint via FastAPI's TestClient. No real Azure or Postgres required.
@@ -64,11 +64,12 @@ class StubCtx:
 
 
 def _rows_for_4_docs() -> list[dict[str, Any]]:
-    # doc[0] has two chunks scoring 0.9 + 0.8 = 1.7
-    # doc[1] has one chunk scoring 1.5
-    # doc[2] has three chunks scoring 0.5+0.4+0.3 = 1.2
-    # doc[3] has one chunk scoring 0.2
-    # doc[0] should rank 1st, then 1, 2, 3.
+    # Per-doc max chunk score:
+    #   doc[0] = max(0.9, 0.8) = 0.9
+    #   doc[1] = 1.5
+    #   doc[2] = max(0.5, 0.4, 0.3) = 0.5
+    #   doc[3] = 0.2
+    # Ordering by score_max: B(1.5), A(0.9), C(0.5), D(0.2).
     return [
         {"doc_id": DOC_IDS[0], "doc_name": "docA.pdf", "chunk_index": 0, "content": "a0", "@search.score": 0.9},
         {"doc_id": DOC_IDS[0], "doc_name": "docA.pdf", "chunk_index": 1, "content": "a1", "@search.score": 0.8},
@@ -108,14 +109,14 @@ def test_top5_collapse_and_order(client_with_rows):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["answer"].startswith("answer over:")
-    # Expect distinct docs, ordered by score_sum: A (1.7), B (1.5), C (1.2), D (0.2)
+    # Distinct docs, ordered by score_max: B(1.5), A(0.9), C(0.5), D(0.2).
     source_ids = [s["doc_id"] for s in body["sources"]]
-    assert source_ids == [DOC_IDS[0], DOC_IDS[1], DOC_IDS[2], DOC_IDS[3]]
+    assert source_ids == [DOC_IDS[1], DOC_IDS[0], DOC_IDS[2], DOC_IDS[3]]
 
     scores = [s["score"] for s in body["sources"]]
-    assert scores[0] == pytest.approx(1.7)
-    assert scores[1] == pytest.approx(1.5)
-    assert scores[2] == pytest.approx(1.2)
+    assert scores[0] == pytest.approx(1.5)
+    assert scores[1] == pytest.approx(0.9)
+    assert scores[2] == pytest.approx(0.5)
     assert scores[3] == pytest.approx(0.2)
 
 
@@ -123,7 +124,7 @@ def test_top_k_truncates(client_with_rows):
     resp = client_with_rows.post("/search", json={"query": "hi", "top_k": 2})
     assert resp.status_code == 200
     body = resp.json()
-    assert [s["doc_id"] for s in body["sources"]] == [DOC_IDS[0], DOC_IDS[1]]
+    assert [s["doc_id"] for s in body["sources"]] == [DOC_IDS[1], DOC_IDS[0]]
 
 
 def test_empty_results_skips_chat(monkeypatch):
