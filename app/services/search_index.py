@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -162,15 +163,25 @@ class SearchGateway:
         if not docs:
             return
         client = self._search()
-        for i in range(0, len(docs), self.UPLOAD_BATCH):
-            batch = docs[i : i + self.UPLOAD_BATCH]
-            results = await client.upload_documents(documents=batch)
+        batches = [
+            docs[i : i + self.UPLOAD_BATCH]
+            for i in range(0, len(docs), self.UPLOAD_BATCH)
+        ]
+        sem = asyncio.Semaphore(4)
+
+        async def upload(batch: list[dict[str, Any]]) -> None:
+            async with sem:
+                results = await client.upload_documents(documents=batch)
             failures = [r for r in results if not r.succeeded]
             if failures:
                 msgs = "; ".join(
                     f"{r.key}: {r.error_message}" for r in failures[:5]
                 )
-                raise SearchIndexError(f"upload failed for {len(failures)} rows: {msgs}")
+                raise SearchIndexError(
+                    f"upload failed for {len(failures)} rows: {msgs}"
+                )
+
+        await asyncio.gather(*(upload(b) for b in batches))
 
     async def delete_by_doc_ids(
         self, doc_ids: Sequence[uuid.UUID | str]

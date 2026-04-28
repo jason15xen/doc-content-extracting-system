@@ -31,8 +31,20 @@ async def create(
 
 
 async def bump_processed(session: AsyncSession, task: Task, by: int = 1) -> None:
-    task.processed_items = (task.processed_items or 0) + by
-    task.updated_at = datetime.now(timezone.utc)
+    # Atomic SQL increment — safe when many per-doc coroutines bump the same
+    # task row concurrently. A load-modify-save pattern would silently lose
+    # increments under concurrency (the in-memory value goes stale between
+    # read and write), causing processed_items to under-count and the UI to
+    # report phantom "stuck" docs.
+    now = datetime.now(timezone.utc)
+    await session.execute(
+        update(Task)
+        .where(Task.id == task.id)
+        .values(
+            processed_items=Task.processed_items + by,
+            updated_at=now,
+        )
+    )
 
 
 async def get(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
