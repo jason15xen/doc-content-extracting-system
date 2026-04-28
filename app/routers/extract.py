@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import tempfile
 from typing import Annotated, Any
@@ -12,6 +13,7 @@ from app.extraction.dispatcher import get_extractor
 from app.extraction.schemas import ExtractionResponse
 
 router = APIRouter(tags=["extract"])
+_LOG = logging.getLogger("app.extract")
 
 
 @router.post(
@@ -62,6 +64,7 @@ async def _process_one(upload: UploadFile) -> dict[str, Any]:
     except ExtractionError as exc:
         return {"filename": filename, "error": f"Extraction failed: {exc}"}
     except Exception as exc:
+        _LOG.exception("unexpected extraction failure for %s", filename)
         return {"filename": filename, "error": f"Extraction failed: {exc}"}
     finally:
         if tmp_path:

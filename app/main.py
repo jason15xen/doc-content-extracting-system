@@ -1,12 +1,14 @@
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.db.session import build_engine, build_sessionmaker
 from app.pipeline import context as pipeline_context
@@ -46,8 +48,10 @@ async def lifespan(app: FastAPI):
         try:
             await search_gw.ensure_index()
         except Exception:
-            # Surface through logs at container level; do not block startup for dev.
-            pass
+            # Don't block startup for dev — but log so the cause is visible.
+            logging.getLogger("app").exception(
+                "ensure_index failed at startup (continuing without aborting)"
+            )
 
     ctx = PipelineContext(
         settings=settings,
@@ -63,13 +67,16 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = ctx
 
     # Reconcile any `running` tasks left over from a prior crash. Tolerant of
-    # unreachable database at startup (e.g. during tests with DI overrides).
+    # unreachable database at startup (e.g. during tests with DI overrides),
+    # but log the cause so silent boot-time DB issues are recoverable.
     try:
         async with sessionmaker() as session:
             await tasks_repo.reconcile_running_tasks(session)
             await session.commit()
     except Exception:
-        pass
+        logging.getLogger("app").exception(
+            "reconcile_running_tasks failed at startup"
+        )
 
     try:
         yield
@@ -86,6 +93,49 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url=None,  # replaced below with a CDN-served newer Swagger UI
 )
+
+
+_REQUEST_LOG = logging.getLogger("app.request")
+
+
+class _RequestTimingMiddleware(BaseHTTPMiddleware):
+    """Log every API call with method, path, status, duration. Skips static
+    UI assets and health pings to keep the log signal-to-noise high."""
+
+    # Exact-match paths — won't accidentally swallow look-alike routes such
+    # as `/health-check` or `/docs-archive` if those are added later. The
+    # `/favicon.ico` entry suppresses 404 noise from browser auto-fetches
+    # whenever someone opens `/ui`.
+    _SKIP_EXACT = frozenset(
+        {"/ui", "/openapi.json", "/docs", "/health", "/favicon.ico"}
+    )
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path in self._SKIP_EXACT:
+            return await call_next(request)
+
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            _REQUEST_LOG.exception(
+                "%s %s -> 500 in %.1fms", request.method, path, elapsed_ms
+            )
+            raise
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        _REQUEST_LOG.info(
+            "%s %s -> %d in %.1fms",
+            request.method,
+            path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
+
+
+app.add_middleware(_RequestTimingMiddleware)
 
 
 _STATIC_DIR = Path(__file__).parent / "static"

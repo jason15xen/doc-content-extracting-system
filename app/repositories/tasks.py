@@ -30,6 +30,21 @@ async def create(
     return task
 
 
+async def set_total_items(
+    session: AsyncSession, task_id: uuid.UUID, total_items: int
+) -> None:
+    """Atomic UPDATE for total_items — mirrors `bump_processed` and avoids
+    the load-modify-save pattern that races with concurrent column writes."""
+    await session.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            total_items=total_items,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+
 async def bump_processed(session: AsyncSession, task: Task, by: int = 1) -> None:
     # Atomic SQL increment — safe when many per-doc coroutines bump the same
     # task row concurrently. A load-modify-save pattern would silently lose

@@ -11,8 +11,6 @@ from tenacity import (
 from app.errors import EmbeddingError
 from app.settings import Settings
 
-_MAX_INFLIGHT_BATCHES = 4
-
 
 class Embedder:
     def __init__(self, settings: Settings) -> None:
@@ -23,6 +21,10 @@ class Embedder:
         )
         self._deployment = settings.azure_openai_embedding_deployment
         self._batch_size = settings.embed_batch_size
+        # Process-wide cap on concurrent embed batches. A per-call semaphore
+        # would let N parallel docs each spin up their own pool, multiplying
+        # the in-flight count by N and defeating the TPM safeguard.
+        self._sem = asyncio.Semaphore(settings.embed_max_inflight_batches)
 
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -32,11 +34,9 @@ class Embedder:
             texts[i : i + self._batch_size]
             for i in range(0, len(texts), self._batch_size)
         ]
-        # Cap concurrent batches per call to avoid overwhelming the TPM quota.
-        sem = asyncio.Semaphore(_MAX_INFLIGHT_BATCHES)
 
         async def run(batch: list[str]) -> list[list[float]]:
-            async with sem:
+            async with self._sem:
                 vectors = await self._embed_batch(batch)
             if len(vectors) != len(batch):
                 raise EmbeddingError(

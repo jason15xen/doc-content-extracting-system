@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import Sequence
 
@@ -7,6 +8,8 @@ from app.repositories import datasets as datasets_repo
 from app.repositories import documents as documents_repo
 from app.repositories import tasks as tasks_repo
 from app.services.storage import try_unlink
+
+_LOG = logging.getLogger("app.delete")
 
 
 async def run_delete_task(task_id: uuid.UUID, doc_ids: Sequence[uuid.UUID]) -> None:
@@ -29,9 +32,17 @@ async def run_dataset_cascade_task(
 
         try:
             doc_ids = await documents_repo.list_ids_by_dataset(session, dataset_id)
-            # Update total_items now that we know how many documents there are
-            task.total_items = max(1, len(doc_ids) + 1)  # +1 for dataset row itself
+            # Atomic UPDATE — keeps the row-write pattern consistent with
+            # bump_processed and avoids any in-memory ORM races on the
+            # shared Task row.
+            await tasks_repo.set_total_items(
+                session, task.id, max(1, len(doc_ids) + 1)
+            )
             await session.commit()
+            # The atomic UPDATE leaves `task.total_items` stale in memory.
+            # Refresh so any subsequent reads on the ORM object see the
+            # post-update value.
+            await session.refresh(task)
 
             await _delete_doc_ids_with_progress(ctx, session, task, doc_ids)
 
@@ -47,6 +58,11 @@ async def run_dataset_cascade_task(
             )
             await session.commit()
         except Exception as exc:
+            _LOG.exception(
+                "dataset cascade task %s failed (dataset=%s)",
+                task_id,
+                dataset_id,
+            )
             await tasks_repo.update_stage_status(
                 session,
                 task,
@@ -79,6 +95,9 @@ async def _delete(
             )
             await session.commit()
         except Exception as exc:
+            _LOG.exception(
+                "delete task %s failed (%d docs)", task_id, len(doc_ids)
+            )
             await tasks_repo.update_stage_status(
                 session,
                 task,

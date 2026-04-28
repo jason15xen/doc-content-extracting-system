@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     chat_max_context_chunks: int = 12
 
     ingest_concurrency: int = 2
+    # Per-instance caps on concurrent calls to upstream services. Tune
+    # downward if you hit Azure OpenAI TPM limits or Azure Search 503s.
+    embed_max_inflight_batches: int = 4
+    search_max_inflight_uploads: int = 4
 
     # ---- Feature flags ----
     enable_semantic_ranking: bool = True
