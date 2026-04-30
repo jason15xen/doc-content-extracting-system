@@ -1,16 +1,24 @@
 from typing import Any
 
-import pymupdf4llm
+import pymupdf
 
 from app.extraction.extractors.base import Extractor
 
 
-class PdfExtractor(Extractor):
-    file_type = "pdf"
+class PymupdfExtractor(Extractor):
+    """PDF / DOCX / PPTX text extraction via PyMuPDF.
+
+    PyMuPDF opens Office formats by rendering them to a paginated layout,
+    so the same per-page `get_text()` call handles all three. XLSX is
+    deliberately routed elsewhere — PyMuPDF clips text-only columns when
+    rendering spreadsheets and silently loses cell content.
+    """
 
     def extract_elements(self, path: str) -> list[dict[str, Any]]:
-        chunks = pymupdf4llm.to_markdown(path, page_chunks=True)
-        return [
-            {"type": "page", "index": i, "text": chunk.get("text", "")}
-            for i, chunk in enumerate(chunks, start=1)
-        ]
+        elements: list[dict[str, Any]] = []
+        with pymupdf.open(path) as doc:
+            for i, page in enumerate(doc, start=1):
+                text = page.get_text()
+                if text and text.strip():
+                    elements.append({"type": "page", "index": i, "text": text})
+        return elements

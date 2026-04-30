@@ -5,7 +5,6 @@ python-docx
 openpyxl
 python-pptx
 PyMuPDF
-pymupdf4llm
 
 pydantic-settings
 sqlalchemy>=2.0
