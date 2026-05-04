@@ -179,21 +179,41 @@ async def _ingest_one(
                 current_stage = PipelineStage(exc.stage)
             except ValueError:
                 pass
-        document.status = DocumentStatus.FAILED.value
-        # Update this task's stage/error via atomic SQL — multiple docs may
-        # fail concurrently and load-modify-save would race on the in-memory
-        # Task row. The aggregated error_message in the finalize block is
-        # the source of truth; this per-doc write is a hint for live tailing.
-        await session.execute(
-            update(Task)
-            .where(Task.id == task_id)
-            .values(
-                stage=current_stage.value,
-                error_message=msg[:2000],
-                updated_at=datetime.now(timezone.utc),
+        # Drop any pending writes from the session before recovery. Without
+        # this, if the original error happened during an autoflush, the
+        # session is in pending-rollback and the recovery UPDATEs below
+        # would surface as PendingRollbackError, masking the real cause.
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        # Use raw UPDATEs (not ORM mutations) — after rollback the session's
+        # identity-map ORM state is stale, so we update by primary key directly.
+        try:
+            await session.execute(
+                update(Document)
+                .where(Document.id == doc_id)
+                .values(status=DocumentStatus.FAILED.value)
             )
-        )
-        await session.commit()
+            await session.execute(
+                update(Task)
+                .where(Task.id == task_id)
+                .values(
+                    stage=current_stage.value,
+                    error_message=msg[:2000],
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+        except Exception:
+            # Best-effort recovery. Even if the DB is so contended this also
+            # fails, reconcile_running_tasks at the next process boot will
+            # flip the doc/task to FAILED. Don't let recovery failure
+            # shadow the original exception.
+            _LOG.exception(
+                "recovery write failed for doc %s; deferring to reconcile_running_tasks",
+                doc_id,
+            )
         raise
 
 
@@ -203,6 +223,14 @@ async def _extract_chunk_embed(
     session,
     task_id: uuid.UUID,
 ) -> tuple[list[str], list[list[float]]]:
+    """Extract → chunk → embed.
+
+    Intentionally does NOT update Task.stage between sub-steps. Each commit
+    acquires the SQLite write lock and serializes all ingest workers; with
+    minutes of network calls between stages, those locks dominated wall-clock
+    under high concurrency. Final stage is set once in `_upsert_and_finalize`.
+    Per-doc progress is observable via the timing log lines below.
+    """
     ext = os.path.splitext(document.name)[1].lower()
     extractor = get_extractor(ext)
     if document.storage_path is None:
@@ -222,8 +250,6 @@ async def _extract_chunk_embed(
         len(plain_text),
         (time.perf_counter() - t0) * 1000.0,
     )
-    await _set_stage(session, task_id, PipelineStage.EXTRACTED)
-    await session.commit()
 
     t0 = time.perf_counter()
     chunks = await run_in_threadpool(
@@ -240,8 +266,6 @@ async def _extract_chunk_embed(
         len(chunks),
         (time.perf_counter() - t0) * 1000.0,
     )
-    await _set_stage(session, task_id, PipelineStage.CHUNKED)
-    await session.commit()
 
     t0 = time.perf_counter()
     vectors = await ctx.embedder.embed_many(chunks)
@@ -255,8 +279,6 @@ async def _extract_chunk_embed(
         len(vectors),
         (time.perf_counter() - t0) * 1000.0,
     )
-    await _set_stage(session, task_id, PipelineStage.EMBEDDED)
-    await session.commit()
     return chunks, vectors
 
 
