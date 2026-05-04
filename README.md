@@ -259,7 +259,7 @@ Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor pr
 
 ## Azure AI Search index
 
-Single index (`rag-documents` by default), push model. See [index.json](index.json) for the full schema.
+Single index (`rag-documents` by default), push model. The schema is defined in code at [app/services/search_index.py](app/services/search_index.py) (`build_index()`); the app creates or updates it on startup when `ENSURE_INDEX_ON_STARTUP=true`. To get a JSON dump for manual PUT, run `python -m scripts.export_index_schema`.
 
 Key fields: `id` (chunk key: `{doc_id}_{chunk_idx}`), `doc_id`, `doc_name`, `dataset_id` (filterable), `content` (searchable, BM25), `content_vector` (1536-dim HNSW cosine), `uploaded_at`.
 
@@ -321,17 +321,17 @@ app/
     search.py                  POST /search (hybrid RAG)
     admin.py                   Orphan file/index cleanup
 migrations/                    Alembic (auto-run on boot via entrypoint)
-scripts/entrypoint.sh          alembic upgrade head + uvicorn
+scripts/
+  entrypoint.sh                alembic upgrade head + uvicorn
+  export_index_schema.py       Dump build_index() output as JSON (for manual PUT)
 docker-compose.yml             API (SQLite at ./db/rag.db, no external DB service)
 Dockerfile
-index.json                     Azure AI Search index schema (reference)
 ```
 
 ## Tests
 
 ```bash
-pip install -r requirements.txt
-pip install pytest pytest-asyncio httpx
+pip install -r requirements-dev.txt   # includes runtime deps + pytest + fixture generators
 python -m pytest tests/ -v
 ```
 

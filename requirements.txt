@@ -1,9 +1,7 @@
 fastapi
 uvicorn[standard]
 python-multipart
-python-docx
 openpyxl
-python-pptx
 PyMuPDF
 
 pydantic-settings
@@ -11,6 +9,7 @@ sqlalchemy>=2.0
 aiosqlite
 alembic
 azure-search-documents>=11.5.0
+azure-ai-documentintelligence>=1.0.0
 aiohttp
 openai>=1.40
 tiktoken
