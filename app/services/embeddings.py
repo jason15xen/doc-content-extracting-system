@@ -23,12 +23,26 @@ class Embedder:
             azure_endpoint=settings.effective_embedding_endpoint,
             api_version=settings.azure_openai_api_version,
         )
-        self._deployment = settings.azure_openai_embedding_deployment
+        # Round-robin across one or two deployments of the same model on the
+        # same Azure resource. Each deployment has its own TPM quota, so two
+        # deployments ~double effective throughput and dodge the per-deployment
+        # 429s we hit on `text-embedding-3-small` at S0 tier.
+        self._deployments: list[str] = [settings.azure_openai_embedding_deployment]
+        if settings.azure_openai_embedding_other_deployment:
+            self._deployments.append(settings.azure_openai_embedding_other_deployment)
+        self._rr_idx = 0
+        self._rr_lock = asyncio.Lock()
         self._batch_size = settings.embed_batch_size
         # Process-wide cap on concurrent embed batches. A per-call semaphore
         # would let N parallel docs each spin up their own pool, multiplying
         # the in-flight count by N and defeating the TPM safeguard.
         self._sem = asyncio.Semaphore(settings.embed_max_inflight_batches)
+
+    async def _next_deployment(self) -> str:
+        async with self._rr_lock:
+            d = self._deployments[self._rr_idx % len(self._deployments)]
+            self._rr_idx += 1
+            return d
 
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
         """Embed `texts` in batches concurrently.
@@ -118,8 +132,9 @@ class Embedder:
         before_sleep=before_sleep_log(_LOG, logging.WARNING),
     )
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        deployment = await self._next_deployment()
         resp = await self._client.embeddings.create(
-            model=self._deployment, input=batch
+            model=deployment, input=batch
         )
         return [item.embedding for item in resp.data]
 
