@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     ocr_pool = None
     if settings.ocr_enabled and settings.ocr_workers > 0:
         try:
-            ocr_pool = build_ocr_pool(settings.ocr_workers)
+            ocr_pool = build_ocr_pool(settings.ocr_workers, settings.logs_dir)
             logging.getLogger("app").info(
                 "ocr pool initialized with %d workers", settings.ocr_workers
             )

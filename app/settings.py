@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # contend with non-scanned docs and erase the "no regression for text
     # docs" property.
     ocr_enabled: bool = True
-    ocr_workers: int = 8
+    ocr_workers: int = 6
     ocr_dpi: int = 200
     ocr_min_chars_for_text: int = 50
     ocr_min_image_area_ratio: float = 0.9

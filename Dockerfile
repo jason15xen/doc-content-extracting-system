@@ -10,14 +10,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-calc \
         libreoffice-impress \
         fonts-dejavu \
-        tesseract-ocr \
-        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# rapidocr-onnxruntime depends on opencv-python, which needs GUI system
+# libraries (libGL, libglib, ...) we don't ship. Swap it for the headless
+# variant — same `cv2` module, no GUI deps. Done as a post-install step
+# because pip resolves the dep transitively from rapidocr.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y opencv-python \
+    && pip install --no-cache-dir opencv-python-headless
+
+# Warm RapidOCR's ONNX models at build time. The wheel ships the models
+# bundled, but instantiating once here surfaces any install/runtime issue
+# during build instead of on first ingest.
+RUN python -c "from rapidocr_onnxruntime import RapidOCR; RapidOCR()"
 
 COPY app ./app
 COPY migrations ./migrations

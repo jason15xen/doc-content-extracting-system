@@ -3,7 +3,9 @@ uvicorn[standard]
 python-multipart
 openpyxl
 PyMuPDF
-pytesseract
+rapidocr-onnxruntime>=1.4.0
+onnxruntime>=1.17.0
+numpy
 Pillow
 
 pydantic-settings
