@@ -82,9 +82,9 @@ def _ocr_worker_init(logs_dir_str: str) -> None:
     """Pre-load the RapidOCR ONNX models. Without this, the first OCR call
     per worker pays a model-load tax (~1-2s) that compounds on a cold pool.
 
-    Also: pin ONNX threads, cap BLAS/OpenMP, and re-attach the parent's
-    file-logging handler so per-page timing logs reach the app log file
-    (spawn workers don't inherit logging handlers from the parent).
+    Also: pin ONNX Runtime threads, cap BLAS/OpenMP, and re-attach the
+    parent's file-logging handler so per-page timing logs reach the app log
+    file (spawn workers don't inherit logging handlers from the parent).
     """
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")

@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # docs" property.
     ocr_enabled: bool = True
     ocr_workers: int = 6
-    ocr_dpi: int = 200
+    ocr_dpi: int = 120
     ocr_min_chars_for_text: int = 50
     ocr_min_image_area_ratio: float = 0.9
     ocr_languages: str = "eng"
