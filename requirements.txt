@@ -3,6 +3,8 @@ uvicorn[standard]
 python-multipart
 openpyxl
 PyMuPDF
+pytesseract
+Pillow
 
 pydantic-settings
 sqlalchemy>=2.0

@@ -41,6 +41,14 @@ async def _run(
         )
         await session.commit()
 
+    # Process small docs first. Text-only PDFs flow through the pipeline in
+    # seconds while large scanned PDFs queue for the OCR pool — without this
+    # ordering a batch where the heaviest doc lands first appears stuck for
+    # minutes even though the rest could finish quickly. Failures to stat
+    # (missing/unreadable file) sort last; the per-doc pipeline will surface
+    # the real error.
+    doc_ids = await _sort_doc_ids_by_size(ctx, doc_ids)
+
     started_at = time.perf_counter()
     _LOG.info(
         "ingest task %s started: %d docs (concurrency=%d)",
@@ -232,7 +240,7 @@ async def _extract_chunk_embed(
     Per-doc progress is observable via the timing log lines below.
     """
     ext = os.path.splitext(document.name)[1].lower()
-    extractor = get_extractor(ext)
+    extractor = get_extractor(ext, ctx)
     if document.storage_path is None:
         raise PipelineError("extracted", "storage path missing")
 
@@ -323,6 +331,30 @@ async def _upsert_and_finalize(
             os.unlink(storage_path)
         except OSError:
             pass
+
+
+async def _sort_doc_ids_by_size(
+    ctx: PipelineContext, doc_ids: list[uuid.UUID]
+) -> list[uuid.UUID]:
+    if len(doc_ids) <= 1:
+        return doc_ids
+    try:
+        async with ctx.sessionmaker() as session:
+            docs = await documents_repo.bulk_get(session, doc_ids)
+    except Exception:
+        _LOG.exception("size-sort lookup failed; preserving original order")
+        return doc_ids
+
+    sizes: dict[uuid.UUID, int] = {}
+    for d in docs:
+        size = 1 << 62  # missing file → sort last
+        if d.storage_path:
+            try:
+                size = os.path.getsize(d.storage_path)
+            except OSError:
+                pass
+        sizes[d.id] = size
+    return sorted(doc_ids, key=lambda did: sizes.get(did, 1 << 62))
 
 
 async def _set_stage(session, task_id: uuid.UUID, stage: PipelineStage) -> None:

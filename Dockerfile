@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-calc \
         libreoffice-impress \
         fonts-dejavu \
+        tesseract-ocr \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv

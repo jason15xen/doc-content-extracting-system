@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.db.session import build_engine, build_sessionmaker
+from app.extraction.ocr import build_ocr_pool
 from app.pipeline import context as pipeline_context
 from app.pipeline.context import PipelineContext
 from app.repositories import tasks as tasks_repo
@@ -53,6 +54,22 @@ async def lifespan(app: FastAPI):
                 "ensure_index failed at startup (continuing without aborting)"
             )
 
+    ocr_pool = None
+    if settings.ocr_enabled and settings.ocr_workers > 0:
+        try:
+            ocr_pool = build_ocr_pool(settings.ocr_workers)
+            logging.getLogger("app").info(
+                "ocr pool initialized with %d workers", settings.ocr_workers
+            )
+        except Exception:
+            # Don't block startup if Tesseract is missing — text-only docs
+            # still work, scanned docs will fail at "empty extraction" as
+            # they did before. Log so the cause is visible.
+            logging.getLogger("app").exception(
+                "ocr pool init failed; continuing without OCR"
+            )
+            ocr_pool = None
+
     ctx = PipelineContext(
         settings=settings,
         sessionmaker=sessionmaker,
@@ -60,6 +77,7 @@ async def lifespan(app: FastAPI):
         chatter=chatter,
         search=search_gw,
         ingest_semaphore=asyncio.Semaphore(settings.ingest_concurrency),
+        ocr_pool=ocr_pool,
     )
     pipeline_context.set_context(ctx)
 
@@ -85,6 +103,8 @@ async def lifespan(app: FastAPI):
         await embedder.aclose()
         await chatter.aclose()
         await engine.dispose()
+        if ocr_pool is not None:
+            ocr_pool.shutdown(wait=False, cancel_futures=True)
         pipeline_context.clear_context()
 
 
