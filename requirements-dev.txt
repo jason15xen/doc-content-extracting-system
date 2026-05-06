@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Test-only — used by tests/conftest.py to generate fixtures.
+# Not imported by anything in the runtime extraction path.
+python-docx
+python-pptx
+
+pytest
+pytest-asyncio

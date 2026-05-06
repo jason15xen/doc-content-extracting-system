@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     embed_max_inflight_batches: int = 4
     search_max_inflight_uploads: int = 4
 
+    # ---- OCR ----
+    # Tesseract-based OCR for scanned PDF pages. Process pool sized to leave
+    # CPU headroom for the rest of the pipeline (chunker tokenization, asyncio
+    # loop, concurrent text-PDF extracts) — without that headroom OCR would
+    # contend with non-scanned docs and erase the "no regression for text
+    # docs" property.
+    ocr_enabled: bool = True
+    ocr_workers: int = 6
+    ocr_dpi: int = 120
+    ocr_min_chars_for_text: int = 50
+    ocr_min_image_area_ratio: float = 0.9
+    ocr_languages: str = "eng"
+
     # ---- Feature flags ----
     enable_semantic_ranking: bool = True
     ensure_index_on_startup: bool = True

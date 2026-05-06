@@ -7,6 +7,7 @@ Populated by app.main.lifespan at startup.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +26,10 @@ class PipelineContext:
     chatter: Chatter
     search: SearchGateway
     ingest_semaphore: asyncio.Semaphore
+    # Process pool for Tesseract OCR. None when ocr_enabled is false. Shared
+    # across all in-flight docs so total CPU stays bounded regardless of
+    # ingest_concurrency.
+    ocr_pool: ProcessPoolExecutor | None = None
 
 
 _ctx: PipelineContext | None = None

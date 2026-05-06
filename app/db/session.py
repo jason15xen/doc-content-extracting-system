@@ -17,7 +17,10 @@ def _register_sqlite_pragmas(engine: AsyncEngine) -> None:
         cur = dbapi_connection.cursor()
         cur.execute("PRAGMA journal_mode = WAL")
         cur.execute("PRAGMA synchronous = NORMAL")
-        cur.execute("PRAGMA busy_timeout = 5000")
+        # 30s is generous on purpose: under heavy ingest load multiple workers
+        # serialize on the single SQLite write lock. 5s would fail occasionally
+        # at INGEST_CONCURRENCY=10+; 30s gives the write queue room to drain.
+        cur.execute("PRAGMA busy_timeout = 30000")
         cur.execute("PRAGMA foreign_keys = ON")
         cur.close()
 

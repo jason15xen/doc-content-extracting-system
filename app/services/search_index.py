@@ -127,7 +127,12 @@ def build_index(name: str, enable_semantic: bool) -> SearchIndex:
 class SearchGateway:
     """Azure AI Search gateway: schema, upsert, delete, hybrid search."""
 
-    UPLOAD_BATCH = 1000
+    # Azure Search caps single uploads at 1,000 docs OR 16 MB, whichever is
+    # hit first. With ~10 KB/chunk (vector + content + metadata), 1,000 chunks
+    # ~= 10 MB on average — but dense pages can push individual chunks past
+    # 20 KB, brushing the 16 MB ceiling. 500 is well under both limits and
+    # only marginally slower (one extra round-trip per ~5,000 chunks).
+    UPLOAD_BATCH = 500
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings

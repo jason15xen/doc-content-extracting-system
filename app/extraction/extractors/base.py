@@ -38,8 +38,7 @@ def _element_text(el: dict[str, Any]) -> str:
         body = "\n".join("\t".join(row) for row in el.get("rows", []))
         return f"{header}\n{body}" if header else body
     if t == "slide":
-        inner = "\n".join(_element_text(item) for item in el.get("items", []))
-        return f"[Slide {el.get('index')}]\n{inner}"
+        return "\n".join(_element_text(item) for item in el.get("items", []))
     if t == "page":
-        return f"[Page {el.get('index')}]\n{el.get('text', '')}"
+        return el.get("text", "")
     return ""
