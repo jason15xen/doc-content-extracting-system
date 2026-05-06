@@ -38,11 +38,6 @@ class Settings(BaseSettings):
     azure_openai_embedding_api_key: str = ""
     azure_openai_embedding_deployment: str = ""
     azure_openai_embedding_model: str = ""
-    # Optional second deployment of the same embedding model on the same
-    # resource. When set, embed batches are round-robined across both
-    # deployments — each has its own TPM quota, so this ~doubles throughput
-    # without changing endpoint/key.
-    azure_openai_embedding_other_deployment: str = ""
 
     # ---- Pipeline tuning ----
     embed_batch_size: int = 16
