@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     ocr_min_image_area_ratio: float = 0.9
     ocr_languages: str = "eng"
 
+    # ---- Azure Document Intelligence (used by /extract-di for A/B
+    # speed comparison against the local PyMuPDF + RapidOCR pipeline) ----
+    azure_document_intelligence_endpoint: str = ""
+    azure_document_intelligence_api_key: str = ""
+
     # ---- Feature flags ----
     enable_semantic_ranking: bool = True
     ensure_index_on_startup: bool = True
