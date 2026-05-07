@@ -1,3 +1,5 @@
+import logging
+import os
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -6,6 +8,8 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Document, DocumentStatus, PipelineStage, Task, TaskStatus, TaskType
+
+_LOG = logging.getLogger("app.tasks")
 
 
 async def create(
@@ -110,9 +114,11 @@ async def update_stage_status(
 
 
 async def reconcile_running_tasks(session: AsyncSession) -> int:
-    """On process boot, mark any tasks stuck in `running` as `failed` and flip
-    any documents left in `processing` back to `failed` so they aren't
-    permanently stuck."""
+    """On process boot, mark any tasks stuck in `running` as `failed`, flip
+    any documents left in `processing` back to `failed`, and reclaim disk by
+    unlinking their staged source files. The pre-crash run never got to clean
+    up; without this step the storage volume leaks one file per interrupted
+    doc."""
     now = datetime.now(timezone.utc)
     stmt = (
         update(Task)
@@ -125,11 +131,34 @@ async def reconcile_running_tasks(session: AsyncSession) -> int:
     )
     result = await session.execute(stmt)
 
+    # Capture storage paths of documents we're about to flip, so we can
+    # unlink them after the row is cleared. SELECT before UPDATE so we don't
+    # race with anything (we're still single-threaded here, but it's cheap
+    # insurance).
+    orphan_paths_q = await session.execute(
+        select(Document.storage_path).where(
+            Document.status == DocumentStatus.PROCESSING.value,
+            Document.storage_path.is_not(None),
+        )
+    )
+    orphan_paths = [row[0] for row in orphan_paths_q.all() if row[0]]
+
     await session.execute(
         update(Document)
         .where(Document.status == DocumentStatus.PROCESSING.value)
-        .values(status=DocumentStatus.FAILED.value)
+        .values(status=DocumentStatus.FAILED.value, storage_path=None)
     )
+
+    for path in orphan_paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if orphan_paths:
+        _LOG.info(
+            "reconcile: reclaimed %d orphan source file(s) from storage",
+            len(orphan_paths),
+        )
     return result.rowcount or 0
 
 

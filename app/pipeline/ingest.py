@@ -170,6 +170,9 @@ async def _ingest_one(
     if document is None:
         raise PipelineError("uploaded", "document row missing")
 
+    # Capture before the try-block so the failure-path cleanup still has the
+    # path even after a session rollback has cleared the ORM state.
+    storage_path = document.storage_path
     current_stage = PipelineStage.UPLOADED
     try:
         document.status = DocumentStatus.PROCESSING.value
@@ -201,7 +204,10 @@ async def _ingest_one(
             await session.execute(
                 update(Document)
                 .where(Document.id == doc_id)
-                .values(status=DocumentStatus.FAILED.value)
+                .values(
+                    status=DocumentStatus.FAILED.value,
+                    storage_path=None,
+                )
             )
             await session.execute(
                 update(Task)
@@ -222,6 +228,14 @@ async def _ingest_one(
                 "recovery write failed for doc %s; deferring to reconcile_running_tasks",
                 doc_id,
             )
+        # Always reclaim disk on failure — for the 2TB ingest the caller
+        # explicitly wants storage emptied regardless of outcome. Re-uploading
+        # the same file later still works (the upload flow will recreate it).
+        if storage_path:
+            try:
+                os.unlink(storage_path)
+            except OSError:
+                pass
         raise
 
 
