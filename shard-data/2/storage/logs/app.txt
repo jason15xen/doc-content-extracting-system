@@ -1,0 +1,58 @@
+2026-05-07 04:49:46 | INFO    | app | file logging initialized at /srv/storage/logs
+2026-05-07 04:49:47 | ERROR   | app | ensure_index failed at startup (continuing without aborting)
+Traceback (most recent call last):
+  File "/srv/app/main.py", line 50, in lifespan
+    await search_gw.ensure_index()
+  File "/srv/app/services/search_index.py", line 171, in ensure_index
+    await self._index().create_or_update_index(index)
+  File "/usr/local/lib/python3.12/site-packages/azure/core/tracing/decorator_async.py", line 119, in wrapper_use_tracer
+    return await func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/search/documents/indexes/aio/_operations/_patch.py", line 157, in create_or_update_index
+    return await self._create_or_update_index(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/core/tracing/decorator_async.py", line 119, in wrapper_use_tracer
+    return await func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/search/documents/indexes/aio/_operations/_operations.py", line 697, in _create_or_update_index
+    raise HttpResponseError(response=response, model=error)
+azure.core.exceptions.HttpResponseError: () The request is invalid. Details: definition : Algorithm name cannot be updated.
+Code: 
+Message: The request is invalid. Details: definition : Algorithm name cannot be updated.
+Exception Details:	() Algorithm name cannot be updated. Parameters: definition
+	Code: 
+	Message: Algorithm name cannot be updated. Parameters: definition
+2026-05-07 04:49:47 | INFO    | app | ocr pool initialized with 6 workers
+2026-05-07 04:49:47 | INFO    | uvicorn.error | Application startup complete.
+2026-05-07 04:49:47 | INFO    | uvicorn.error | Uvicorn running on http://0.0.0.0:8889 (Press CTRL+C to quit)
+2026-05-07 04:49:48 | INFO    | uvicorn.error | Shutting down
+2026-05-07 04:49:48 | INFO    | uvicorn.error | Waiting for application shutdown.
+2026-05-07 04:49:48 | INFO    | uvicorn.error | Application shutdown complete.
+2026-05-07 04:49:48 | INFO    | uvicorn.error | Finished server process [1]
+2026-05-07 04:49:53 | INFO    | app | file logging initialized at /srv/storage/logs
+2026-05-07 04:49:54 | ERROR   | app | ensure_index failed at startup (continuing without aborting)
+Traceback (most recent call last):
+  File "/srv/app/main.py", line 50, in lifespan
+    await search_gw.ensure_index()
+  File "/srv/app/services/search_index.py", line 171, in ensure_index
+    await self._index().create_or_update_index(index)
+  File "/usr/local/lib/python3.12/site-packages/azure/core/tracing/decorator_async.py", line 119, in wrapper_use_tracer
+    return await func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/search/documents/indexes/aio/_operations/_patch.py", line 157, in create_or_update_index
+    return await self._create_or_update_index(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/core/tracing/decorator_async.py", line 119, in wrapper_use_tracer
+    return await func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/azure/search/documents/indexes/aio/_operations/_operations.py", line 697, in _create_or_update_index
+    raise HttpResponseError(response=response, model=error)
+azure.core.exceptions.HttpResponseError: () The request is invalid. Details: definition : Algorithm name cannot be updated.
+Code: 
+Message: The request is invalid. Details: definition : Algorithm name cannot be updated.
+Exception Details:	() Algorithm name cannot be updated. Parameters: definition
+	Code: 
+	Message: Algorithm name cannot be updated. Parameters: definition
+2026-05-07 04:49:54 | INFO    | app | ocr pool initialized with 6 workers
+2026-05-07 04:49:54 | INFO    | uvicorn.error | Application startup complete.
+2026-05-07 04:49:54 | INFO    | uvicorn.error | Uvicorn running on http://0.0.0.0:8889 (Press CTRL+C to quit)

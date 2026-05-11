@@ -1,0 +1,165 @@
+# Sharded ingest topology: 1 coordinator + 15 workers behind one URL.
+#
+#   docker compose -f docker-compose.shard.yml up -d
+#
+# Each worker is byte-identical to the existing rag-for-2tb image — only the
+# coordinator runs new code (app.coordinator.main). The coordinator listens
+# on the host's port 8889; workers stay on an internal network.
+#
+# Each worker has its OWN SQLite + storage volume under ./shard-data/<i>/
+# so they cannot contend on writes. All workers share one Azure AI Search
+# index via the AZURE_SEARCH_* env vars in .env.
+#
+# In production, run each worker on its own host (8 vCPU / 8 GB RAM /
+# 200 GB SSD). This file is the single-machine reference / dev topology;
+# translate to Azure Container Apps Jobs (or 15 VMs running this image) for
+# the real 2TB ingest.
+
+x-image: &image
+  image: ${ACR_REGISTRY:-acraianalytic.azurecr.io}/rag-for-2tb:${IMAGE_TAG:-latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-worker-base: &worker-base
+  <<: *image
+  env_file:
+    - path: .env
+      required: false
+    - path: .env.dev
+      required: false
+  restart: unless-stopped
+
+services:
+  coordinator:
+    <<: *image
+    container_name: rag-coordinator
+    environment:
+      WORKER_MODE: coordinator
+      SHARD_TOTAL: "15"
+      WORKER_HOST_TEMPLATE: "http://worker-{i}:8889"
+      COORDINATOR_TIMEOUT: "600"
+    ports:
+      - "8889:8889"
+    depends_on:
+      - worker-0
+      - worker-1
+      - worker-2
+      - worker-3
+      - worker-4
+      - worker-5
+      - worker-6
+      - worker-7
+      - worker-8
+      - worker-9
+      - worker-10
+      - worker-11
+      - worker-12
+      - worker-13
+      - worker-14
+    restart: unless-stopped
+
+  worker-0:
+    <<: *worker-base
+    container_name: rag-worker-0
+    volumes:
+      - ./shard-data/0/storage:/srv/storage
+      - ./shard-data/0/db:/srv/db
+
+  worker-1:
+    <<: *worker-base
+    container_name: rag-worker-1
+    volumes:
+      - ./shard-data/1/storage:/srv/storage
+      - ./shard-data/1/db:/srv/db
+
+  worker-2:
+    <<: *worker-base
+    container_name: rag-worker-2
+    volumes:
+      - ./shard-data/2/storage:/srv/storage
+      - ./shard-data/2/db:/srv/db
+
+  worker-3:
+    <<: *worker-base
+    container_name: rag-worker-3
+    volumes:
+      - ./shard-data/3/storage:/srv/storage
+      - ./shard-data/3/db:/srv/db
+
+  worker-4:
+    <<: *worker-base
+    container_name: rag-worker-4
+    volumes:
+      - ./shard-data/4/storage:/srv/storage
+      - ./shard-data/4/db:/srv/db
+
+  worker-5:
+    <<: *worker-base
+    container_name: rag-worker-5
+    volumes:
+      - ./shard-data/5/storage:/srv/storage
+      - ./shard-data/5/db:/srv/db
+
+  worker-6:
+    <<: *worker-base
+    container_name: rag-worker-6
+    volumes:
+      - ./shard-data/6/storage:/srv/storage
+      - ./shard-data/6/db:/srv/db
+
+  worker-7:
+    <<: *worker-base
+    container_name: rag-worker-7
+    volumes:
+      - ./shard-data/7/storage:/srv/storage
+      - ./shard-data/7/db:/srv/db
+
+  worker-8:
+    <<: *worker-base
+    container_name: rag-worker-8
+    volumes:
+      - ./shard-data/8/storage:/srv/storage
+      - ./shard-data/8/db:/srv/db
+
+  worker-9:
+    <<: *worker-base
+    container_name: rag-worker-9
+    volumes:
+      - ./shard-data/9/storage:/srv/storage
+      - ./shard-data/9/db:/srv/db
+
+  worker-10:
+    <<: *worker-base
+    container_name: rag-worker-10
+    volumes:
+      - ./shard-data/10/storage:/srv/storage
+      - ./shard-data/10/db:/srv/db
+
+  worker-11:
+    <<: *worker-base
+    container_name: rag-worker-11
+    volumes:
+      - ./shard-data/11/storage:/srv/storage
+      - ./shard-data/11/db:/srv/db
+
+  worker-12:
+    <<: *worker-base
+    container_name: rag-worker-12
+    volumes:
+      - ./shard-data/12/storage:/srv/storage
+      - ./shard-data/12/db:/srv/db
+
+  worker-13:
+    <<: *worker-base
+    container_name: rag-worker-13
+    volumes:
+      - ./shard-data/13/storage:/srv/storage
+      - ./shard-data/13/db:/srv/db
+
+  worker-14:
+    <<: *worker-base
+    container_name: rag-worker-14
+    volumes:
+      - ./shard-data/14/storage:/srv/storage
+      - ./shard-data/14/db:/srv/db

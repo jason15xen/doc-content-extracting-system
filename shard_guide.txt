@@ -1,0 +1,2 @@
+Build the image (docker compose -f docker-compose.shard.yml build).
+Push it to ACR (docker compose -f docker-compose.shard.yml push).
