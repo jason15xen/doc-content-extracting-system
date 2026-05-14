@@ -434,22 +434,33 @@ async function deleteDataset(id, name) {
 }
 
 // --- documents ---
+// Pagination state for the Documents tab. Persists across Refresh clicks so
+// the user stays on the page they were viewing; resets only when explicitly
+// jumping to page 1.
+const DOCUMENTS_PAGE_SIZE = 50;
+let documentsOffset = 0;
+
 async function loadDocuments() {
   try {
-    // Server caps `limit` at 200 per call, so page through until exhausted.
-    const pageSize = 200;
-    let offset = 0;
-    let items = [];
-    let total = 0;
-    while (true) {
-      const resp = await api(`/documents?limit=${pageSize}&offset=${offset}`);
-      total = resp.meta.total;
-      if (!resp.items.length) break;
-      items = items.concat(resp.items);
-      if (resp.items.length < pageSize) break;
-      offset += pageSize;
+    if (documentsOffset < 0) documentsOffset = 0;
+    const resp = await api(`/documents?limit=${DOCUMENTS_PAGE_SIZE}&offset=${documentsOffset}`);
+    const items = resp.items || [];
+    const total = resp.meta?.total ?? 0;
+
+    // Snap-back: deletes can shrink `total` below the current offset, leaving
+    // an empty page. Jump to the last valid page and re-fetch once.
+    if (!items.length && total > 0 && documentsOffset > 0) {
+      documentsOffset = Math.max(0, Math.floor((total - 1) / DOCUMENTS_PAGE_SIZE) * DOCUMENTS_PAGE_SIZE);
+      return loadDocuments();
     }
-    if (!items.length) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
+
+    if (!total) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
+
+    const start = documentsOffset + 1;
+    const end = documentsOffset + items.length;
+    const hasPrev = documentsOffset > 0;
+    const hasNext = end < total;
+
     $('documents-table').innerHTML = `
       <table>
         <thead><tr><th>Name</th><th>Status</th><th>Chunks</th><th>Dataset</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
@@ -464,10 +475,23 @@ async function loadDocuments() {
             <td><button class="danger" onclick="deleteDoc('${d.id}')">Delete</button></td>
           </tr>`).join('')}</tbody>
       </table>
-      <div class="muted" style="margin-top:8px">${items.length} of ${total} total</div>`;
+      <div class="muted" style="margin-top:8px; display:flex; align-items:center; gap:8px;">
+        <button class="ghost" onclick="documentsPrev()" ${hasPrev ? '' : 'disabled'}>‹ Prev</button>
+        <span>Showing ${start}-${end} of ${total}</span>
+        <button class="ghost" onclick="documentsNext()" ${hasNext ? '' : 'disabled'}>Next ›</button>
+      </div>`;
   } catch (e) {
     $('documents-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
   }
+}
+
+function documentsPrev() {
+  documentsOffset = Math.max(0, documentsOffset - DOCUMENTS_PAGE_SIZE);
+  loadDocuments();
+}
+function documentsNext() {
+  documentsOffset += DOCUMENTS_PAGE_SIZE;
+  loadDocuments();
 }
 async function deleteDoc(id) {
   if (!confirm('Delete this document?')) return;
