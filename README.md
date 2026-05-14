@@ -11,8 +11,8 @@ A FastAPI service that ingests documents, extracts text, chunks and embeds them 
   POST /documents/upload
        │
        ▼
-  Save to disk ──► Extract text ──► Chunk (tiktoken) ──► Embed (Azure OpenAI)
-  + SHA-256 hash   (12 formats)     800 tok / 100 overlap  text-embedding-3-small
+  Stream to temp ──► Extract text ──► Chunk (tiktoken) ──► Embed (Azure OpenAI)
+  + SHA-256 hash     (12 formats)     800 tok / 100 overlap  text-embedding-3-small
        │                                                        │
        ▼                                                        ▼
   SQLite (./db/rag.db)                                    Azure AI Search
@@ -213,14 +213,18 @@ Sources are the top-5 documents ranked by cumulative score (sum of per-chunk sco
 
 When a document is uploaded, a background task runs this pipeline:
 
-1. **Upload** -- file saved to `storage/uploads/{doc_id}{ext}`, SHA-256 computed, duplicates rejected.
+1. **Upload** -- file streamed to an OS temp file (allocated via `tempfile.mkstemp`); source bytes are never written under `storage/uploads/`. SHA-256 computed during the stream; duplicates rejected.
 2. **Extract** -- text extracted using the appropriate extractor (docx, pdf, etc.).
 3. **Chunk** -- text split into 800-token chunks with 100-token overlap (tiktoken `cl100k_base`).
 4. **Embed** -- each chunk embedded via Azure OpenAI `text-embedding-3-small` (1536 dims, batched 16 at a time).
 5. **Index** -- chunks pushed to Azure AI Search with vector + metadata.
-6. **Cleanup** -- local file deleted on success; preserved on failure for debugging.
+6. **Cleanup** -- temp file is always unlinked, whether the pipeline succeeded or failed for that document.
 
-Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor progress.
+**Batch ordering** -- when a single upload contains many files, the batch is processed largest-first (LPT scheduling). The biggest doc starts at `t=0` alongside the rest of the workers instead of running as a serial tail at the end of the queue.
+
+**Task vs. document status** -- an ingest task is marked `success` when the batch runs to completion, even if some documents inside it failed. Per-document failures remain visible as `status=failed` rows in `GET /documents`; the task status reflects "did the batch complete", not "did every doc succeed". The "N ok, K failed" summary is logged at INFO level for each finished task.
+
+Each stage is tracked in the `tasks` table. `GET /tasks/{id}` returns the current progress for a programmatic client.
 
 ## Database schema
 
@@ -242,7 +246,7 @@ Each stage is tracked in the `tasks` table. Poll `GET /tasks/{id}` to monitor pr
 | dataset_id | UUID FK (nullable) |
 | uploaded_at | DATETIME (UTC) |
 | status | pending / processing / success / failed |
-| storage_path | TEXT (null after success) |
+| storage_path | TEXT (temp file path while in-flight; null after processing — success or failure) |
 | chunk_count | INTEGER |
 
 ### tasks

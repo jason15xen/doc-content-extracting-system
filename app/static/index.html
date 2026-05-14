@@ -198,9 +198,7 @@
     <div class="panel">
       <div class="toolbar">
         <div>
-          <label style="display:inline">Auto-refresh</label>
-          <input type="checkbox" id="tasks-auto" checked />
-          <button class="ghost" onclick="loadTasks()">Refresh now</button>
+          <button class="ghost" onclick="loadTasks()">Refresh</button>
         </div>
         <div>
           <button class="danger" onclick="deleteAllTasks()">Delete all tasks</button>
@@ -310,36 +308,13 @@ async function uploadFiles() {
     const resp = await api('/documents/upload', { method: 'POST', body: fd });
     showResult(resultEl, resp, true);
     if (resp.task_id) {
-      pollUploadTask(resp.task_id);
+      const box = $('upload-task-progress');
+      box.style.display = 'block';
+      box.innerHTML = `<div class="muted">Ingest task started: <code>${esc(resp.task_id)}</code>. Open the Tasks tab and click Refresh to see progress.</div>`;
     }
   } catch (e) {
     showResult(resultEl, e.body || String(e), false);
   }
-}
-
-async function pollUploadTask(taskId) {
-  const box = $('upload-task-progress');
-  box.style.display = 'block';
-  const doPoll = async () => {
-    try {
-      const t = await api('/tasks/' + taskId);
-      const pct = t.progress || 0;
-      const klass = t.status === 'success' ? 'success' : t.status === 'failed' ? 'failed' : '';
-      box.innerHTML = `
-        <div class="progress">
-          <span class="pill ${t.status}">${t.status}</span>
-          <div class="progress-bar"><div class="progress-fill ${klass}" style="width:${pct}%"></div></div>
-          <span class="muted">${pct}% · ${esc(t.result || '')}</span>
-        </div>
-        <div class="muted" style="margin-top:6px">elapsed: ${t.processed_time}s · task: <code>${taskId}</code></div>
-      `;
-      if (t.status !== 'running' && t.status !== 'queued') return;
-      setTimeout(doPoll, 1500);
-    } catch (e) {
-      box.innerHTML = `<div class="result err">poll failed: ${esc(e.body ? JSON.stringify(e.body) : String(e))}</div>`;
-    }
-  };
-  doPoll();
 }
 
 // --- search ---
@@ -543,7 +518,6 @@ async function deleteFailedDocuments() {
 }
 
 // --- tasks ---
-let tasksTimer = null;
 async function loadTasks() {
   try {
     const resp = await api('/tasks?limit=50');
@@ -586,16 +560,6 @@ async function deleteAllTasks() {
   try { await api('/tasks', { method: 'DELETE' }); loadTasks(); }
   catch (e) { alert(JSON.stringify(e.body || e)); }
 }
-function setupTasksAutoRefresh() {
-  clearInterval(tasksTimer);
-  tasksTimer = setInterval(() => {
-    if ($('tasks-auto').checked && document.getElementById('tab-tasks').classList.contains('active')) {
-      loadTasks();
-    }
-  }, 2000);
-}
-setupTasksAutoRefresh();
-
 // --- logs ---
 function humanSize(n) {
   if (n < 1024) return `${n} B`;
