@@ -32,7 +32,7 @@ from app.schemas.documents import (
 )
 from app.schemas.upload import UploadAcceptedItem, UploadResponse
 from app.services.hashing import OversizeError, save_upload_with_hash
-from app.services.storage import try_unlink, upload_path
+from app.services.storage import temp_upload_path, try_unlink
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -75,11 +75,14 @@ async def upload_documents(
             )
             continue
 
-        staging_id = uuid.uuid4()
-        staging_path = upload_path(ctx.settings.uploads_dir, staging_id, ext)
+        # Stream to a unique file under the OS temp dir. The ingest pipeline
+        # always unlinks this path (success or failure) so uploaded source
+        # bytes never persist under storage/uploads.
+        scratch_path = temp_upload_path(ext)
         try:
-            hash_hex, _size = await save_upload_with_hash(upload, staging_path, max_bytes)
+            hash_hex, _size = await save_upload_with_hash(upload, scratch_path, max_bytes)
         except OversizeError as exc:
+            try_unlink(scratch_path)
             items.append(
                 UploadAcceptedItem(
                     filename=filename, status="failed", reason=f"oversize:{exc}"
@@ -87,7 +90,7 @@ async def upload_documents(
             )
             continue
         except Exception as exc:
-            try_unlink(staging_path)
+            try_unlink(scratch_path)
             items.append(
                 UploadAcceptedItem(
                     filename=filename, status="failed", reason=f"save_error:{exc}"
@@ -97,7 +100,7 @@ async def upload_documents(
 
         existing = await documents_repo.get_by_hash(session, hash_hex)
         if existing is not None:
-            try_unlink(staging_path)
+            try_unlink(scratch_path)
             items.append(
                 UploadAcceptedItem(
                     filename=filename, status="failed", reason="duplicate"
@@ -110,27 +113,14 @@ async def upload_documents(
             name=filename,
             hash_=hash_hex,
             dataset_id=dataset_id,
-            storage_path=str(staging_path),
+            storage_path=str(scratch_path),
         )
-        final_path = upload_path(ctx.settings.uploads_dir, doc.id, ext)
-        try:
-            os.rename(staging_path, final_path)
-        except OSError as exc:
-            await session.rollback()
-            try_unlink(staging_path)
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename, status="failed", reason=f"rename_error:{exc}"
-                )
-            )
-            continue
-        doc.storage_path = str(final_path)
 
         try:
             await session.commit()
         except Exception as exc:
             await session.rollback()
-            try_unlink(final_path)
+            try_unlink(scratch_path)
             items.append(
                 UploadAcceptedItem(
                     filename=filename, status="failed", reason=f"commit_error:{exc}"

@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     ocr_min_chars_for_text: int = 50
     ocr_min_image_area_ratio: float = 0.9
     ocr_languages: str = "eng"
+    # Classifier-only mode: when true, scan-detection still runs but ANY
+    # detected scanned page rejects the whole doc instead of OCR-ing it.
+    # Use this when you want to index the easy text-only docs fast and defer
+    # scanned content for a separate (slower) OCR pass later. Independent
+    # of `ocr_enabled` — typically set with OCR_ENABLED=false.
+    ocr_reject_scanned: bool = False
 
     # ---- Feature flags ----
     enable_semantic_ranking: bool = True

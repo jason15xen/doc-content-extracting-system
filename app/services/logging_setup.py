@@ -16,6 +16,21 @@ _DETACHED_LOGGERS = ("uvicorn", "uvicorn.access")
 _DATED_RE = re.compile(r"^app-(\d{4}-\d{2}-\d{2})\.txt$")
 
 
+class _AccessLogPollFilter(logging.Filter):
+    """Drop the UI's high-frequency task-status polls from the access log.
+    The Tasks tab hits GET /tasks every 2s and the upload box hits
+    GET /tasks/{id} every 1.5s — useful in devtools, just noise in the file."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        method, path = args[1], args[2]
+        if method != "GET":
+            return True
+        return not (path == "/tasks" or path.startswith("/tasks?") or path.startswith("/tasks/"))
+
+
 def _namer(default_name: str) -> str:
     """TimedRotatingFileHandler rolls `app.txt` → `app.txt.YYYY-MM-DD` by
     default. Rewrite that to `app-YYYY-MM-DD.txt` so rotated files keep the
@@ -94,6 +109,10 @@ def setup_file_logging(logs_dir: Path, level: int = logging.INFO) -> None:
         sub = logging.getLogger(name)
         _attach(sub)
         sub.propagate = False
+
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogPollFilter) for f in access.filters):
+        access.addFilter(_AccessLogPollFilter())
 
     # Silence noisy per-request INFO logs from Azure and httpx. Every HTTP
     # call dumps ~12 lines of headers each otherwise, which drowns the log

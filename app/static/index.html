@@ -163,6 +163,7 @@
           <button class="ghost" onclick="loadDocuments()">Refresh</button>
         </div>
         <div>
+          <button class="danger" onclick="deleteFailedDocuments()">Delete failed</button>
           <button class="danger" onclick="deleteAllDocuments()">Delete all</button>
         </div>
       </div>
@@ -435,12 +436,24 @@ async function deleteDataset(id, name) {
 // --- documents ---
 async function loadDocuments() {
   try {
-    const resp = await api('/documents?limit=100');
-    if (!resp.items.length) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
+    // Server caps `limit` at 200 per call, so page through until exhausted.
+    const pageSize = 200;
+    let offset = 0;
+    let items = [];
+    let total = 0;
+    while (true) {
+      const resp = await api(`/documents?limit=${pageSize}&offset=${offset}`);
+      total = resp.meta.total;
+      if (!resp.items.length) break;
+      items = items.concat(resp.items);
+      if (resp.items.length < pageSize) break;
+      offset += pageSize;
+    }
+    if (!items.length) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
     $('documents-table').innerHTML = `
       <table>
         <thead><tr><th>Name</th><th>Status</th><th>Chunks</th><th>Dataset</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
-        <tbody>${resp.items.map(d => `
+        <tbody>${items.map(d => `
           <tr>
             <td>${esc(d.name)}</td>
             <td><span class="pill ${d.status}">${d.status}</span></td>
@@ -451,7 +464,7 @@ async function loadDocuments() {
             <td><button class="danger" onclick="deleteDoc('${d.id}')">Delete</button></td>
           </tr>`).join('')}</tbody>
       </table>
-      <div class="muted" style="margin-top:8px">${resp.items.length} of ${resp.meta.total} total</div>`;
+      <div class="muted" style="margin-top:8px">${items.length} of ${total} total</div>`;
   } catch (e) {
     $('documents-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
   }
@@ -471,6 +484,36 @@ async function deleteAllDocuments() {
   if (!confirm('Delete ALL documents? This also removes chunks from Azure AI Search.')) return;
   try {
     await api('/documents/all', { method: 'DELETE' });
+    setTimeout(loadDocuments, 400);
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function deleteFailedDocuments() {
+  // Collect all failed doc ids first. The list endpoint caps `limit` at 200
+  // server-side, so we page through until exhausted — handles batches that
+  // had hundreds of scan-rejected docs in one run.
+  let ids = [];
+  let offset = 0;
+  const pageSize = 200;
+  try {
+    while (true) {
+      const resp = await api(`/documents?status_filter=failed&limit=${pageSize}&offset=${offset}`);
+      if (!resp.items.length) break;
+      ids = ids.concat(resp.items.map(d => d.id));
+      if (resp.items.length < pageSize) break;
+      offset += pageSize;
+    }
+  } catch (e) {
+    alert('Failed to list failed docs: ' + JSON.stringify(e.body || e));
+    return;
+  }
+  if (ids.length === 0) { alert('No failed documents to delete.'); return; }
+  if (!confirm(`Delete ${ids.length} failed document${ids.length === 1 ? '' : 's'}? This also removes their chunks from Azure AI Search.`)) return;
+  try {
+    await api('/documents', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ doc_ids: ids }),
+    });
     setTimeout(loadDocuments, 400);
   } catch (e) { alert(JSON.stringify(e.body || e)); }
 }

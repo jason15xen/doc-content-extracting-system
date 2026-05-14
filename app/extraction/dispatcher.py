@@ -34,6 +34,7 @@ def get_extractor(ext: str, ctx: "PipelineContext | None" = None) -> Extractor:
                 ocr_min_chars_for_text=s.ocr_min_chars_for_text,
                 ocr_min_image_area_ratio=s.ocr_min_image_area_ratio,
                 ocr_languages=s.ocr_languages,
+                reject_scanned=s.ocr_reject_scanned,
             )
         return PymupdfExtractor(file_type=file_type)
     if ext in (".xlsx", ".xlsm"):

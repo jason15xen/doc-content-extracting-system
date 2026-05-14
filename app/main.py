@@ -27,10 +27,6 @@ from app.settings import get_settings
 async def lifespan(app: FastAPI):
     settings = get_settings()
     try:
-        settings.uploads_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    try:
         setup_file_logging(settings.logs_dir)
         logging.getLogger("app").info(
             "file logging initialized at %s", settings.logs_dir
@@ -133,6 +129,11 @@ class _RequestTimingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if path in self._SKIP_EXACT:
+            return await call_next(request)
+        # Skip the UI's task-status poll loops (Tasks tab every 2s,
+        # upload progress every 1.5s). DELETE /tasks and DELETE
+        # /tasks/{id} are user actions — they still get logged.
+        if request.method == "GET" and (path == "/tasks" or path.startswith("/tasks/")):
             return await call_next(request)
 
         start = time.perf_counter()
