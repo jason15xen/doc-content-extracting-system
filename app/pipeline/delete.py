@@ -2,7 +2,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 
-from app.db.models import ProcessingStep, TaskFileStatus
+from app.db.models import DocumentStatus, ProcessingStep, TaskFileStatus
 from app.pipeline.context import PipelineContext, get_context
 from app.repositories import datasets as datasets_repo
 from app.repositories import documents as documents_repo
@@ -14,8 +14,17 @@ _LOG = logging.getLogger("app.delete")
 
 
 async def run_delete_task(task_id: uuid.UUID, doc_ids: Sequence[str]) -> None:
-    ctx = get_context()
-    await _delete(ctx, task_id, list(doc_ids))
+    """BackgroundTasks entrypoint. The outer try/except guarantees that even
+    a catastrophic crash inside the pipeline gets logged — otherwise an
+    uncaught exception in a background task is silently swallowed by
+    Starlette's BackgroundTasks runner, and the task row stays at
+    ``processing`` forever, exactly the symptom we hit before."""
+    _LOG.info("run_delete_task entry: task=%s, doc_ids=%s", task_id, list(doc_ids))
+    try:
+        ctx = get_context()
+        await _delete(ctx, task_id, list(doc_ids))
+    except Exception:
+        _LOG.exception("run_delete_task crashed for task %s", task_id)
 
 
 async def run_dataset_cascade_task(
@@ -139,17 +148,62 @@ async def _delete_doc_ids_with_progress(
         if document is None:
             failed = True
             err_msg = "document not found"
+            _LOG.info("delete[%s] doc=%s NOT FOUND in DB", task_id, doc_id)
         else:
+            _LOG.info(
+                "delete[%s] doc=%s found (status=%s, has_storage_path=%s)",
+                task_id, doc_id, document.status, bool(storage_path),
+            )
+            # Failed/pending docs were never indexed in Azure Search and have
+            # no chunks to remove; calling delete on them costs a round trip
+            # and, if the index is unreachable or returns 404 on the filter
+            # query, would falsely fail the delete. Skip the call for those
+            # and only hit Azure when the doc actually made it to SUCCESS.
+            #
+            # For SUCCESS docs, the Azure delete is BEST-EFFORT — a remote
+            # failure must NOT block the SQLite row delete, otherwise the
+            # user can never get a failed doc out of the list (the next
+            # retry repeats the same Azure failure). Orphaned chunks left
+            # behind are cleanable via /admin/cleanup/orphan-index.
+            azure_warning: str | None = None
+            if document.status == DocumentStatus.SUCCESS.value:
+                _LOG.info("delete[%s] doc=%s calling azure-search delete", task_id, doc_id)
+                try:
+                    await ctx.search.delete_by_doc_ids([doc_id])
+                    _LOG.info("delete[%s] doc=%s azure-search delete ok", task_id, doc_id)
+                except Exception as exc:
+                    azure_warning = f"{type(exc).__name__}: {exc}"
+                    _LOG.warning(
+                        "delete[%s] doc=%s azure-search delete FAILED, "
+                        "continuing to DB delete (orphan chunks may remain): %s",
+                        task_id, doc_id, azure_warning,
+                    )
+            else:
+                _LOG.info(
+                    "delete[%s] doc=%s status=%s — skipping azure delete (never indexed)",
+                    task_id, doc_id, document.status,
+                )
+
+            if storage_path:
+                try_unlink(storage_path)
+                _LOG.info("delete[%s] doc=%s unlinked %s", task_id, doc_id, storage_path)
+
             try:
-                await ctx.search.delete_by_doc_ids([doc_id])
-                if storage_path:
-                    try_unlink(storage_path)
                 async with ctx.sessionmaker() as session:
-                    await documents_repo.delete_many(session, [doc_id])
+                    rowcount = await documents_repo.delete_many(session, [doc_id])
                     await session.commit()
+                _LOG.info("delete[%s] doc=%s DB delete rowcount=%s", task_id, doc_id, rowcount)
+                if rowcount == 0:
+                    # Row was already gone — treat as success (idempotent).
+                    _LOG.warning(
+                        "delete[%s] doc=%s DB delete affected 0 rows; "
+                        "doc was already removed by another worker?",
+                        task_id, doc_id,
+                    )
             except Exception as exc:
                 failed = True
-                err_msg = f"{type(exc).__name__}: {exc}"
+                err_msg = f"DB delete failed: {type(exc).__name__}: {exc}"
+                _LOG.exception("delete[%s] doc=%s DB delete raised", task_id, doc_id)
 
         async with ctx.sessionmaker() as session:
             if failed:

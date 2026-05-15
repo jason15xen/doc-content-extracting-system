@@ -625,8 +625,8 @@ async function loadDatasets() {
             <td class="mono">${d.id}</td>
             <td>
               <button class="ghost" onclick='editDataset(${JSON.stringify(d).replace(/'/g, "&#39;")})'>Edit</button>
-              <button class="ghost" onclick="deleteDataset('${d.id}', '${esc(d.name)}', true)">Keep docs</button>
-              <button class="danger" onclick="deleteDataset('${d.id}', '${esc(d.name)}', false)">Delete +docs</button>
+              <button class="ghost" data-ds-id="${d.id}" data-ds-name="${esc(d.name)}" onclick="deleteDataset(this.dataset.dsId, this.dataset.dsName, true)">Keep docs</button>
+              <button class="danger" data-ds-id="${d.id}" data-ds-name="${esc(d.name)}" onclick="deleteDataset(this.dataset.dsId, this.dataset.dsName, false)">Delete +docs</button>
             </td>
           </tr>`).join('')}</tbody>
       </table>`;
@@ -704,7 +704,7 @@ async function loadDocuments() {
             <td class="muted">${esc(d.description || '')}</td>
             <td class="muted">${fmtDate(d.uploaded_date)}</td>
             <td class="mono">${esc(d.id)}</td>
-            <td><button class="danger" onclick="deleteDoc('${esc(d.id)}')">Delete</button></td>
+            <td><button class="danger" data-doc-id="${esc(d.id)}" onclick="deleteDoc(this.dataset.docId)">Delete</button></td>
           </tr>`).join('')}</tbody>
       </table>
       <div class="muted" style="margin-top:8px">Showing ${items.length} of ${resp.total_count} documents${resp.dataset ? ` (dataset filter active)` : ''}.</div>`;
