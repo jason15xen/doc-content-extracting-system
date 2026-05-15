@@ -15,7 +15,7 @@ from app.extraction.ocr import build_ocr_pool
 from app.pipeline import context as pipeline_context
 from app.pipeline.context import PipelineContext
 from app.repositories import tasks as tasks_repo
-from app.routers import admin, datasets, documents, extract, health, search, tasks
+from app.routers import admin, datasets, documents, extract, health, query, tasks
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
 from app.services.logging_setup import setup_file_logging
@@ -130,10 +130,13 @@ class _RequestTimingMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path in self._SKIP_EXACT:
             return await call_next(request)
-        # Skip the UI's task-status poll loops (Tasks tab every 2s,
-        # upload progress every 1.5s). DELETE /tasks and DELETE
-        # /tasks/{id} are user actions — they still get logged.
-        if request.method == "GET" and (path == "/tasks" or path.startswith("/tasks/")):
+        # Skip the UI's task-status poll loops. Tasks tab polls GET
+        # /doc/tasks every 2s, the upload progress widget polls GET
+        # /doc/status/{id} every 1.5s. POST/DELETE on these paths are user
+        # actions — they still get logged.
+        if request.method == "GET" and (
+            path == "/doc/tasks" or path.startswith("/doc/status/")
+        ):
             return await call_next(request)
 
         start = time.perf_counter()
@@ -187,7 +190,7 @@ app.include_router(extract.router)
 app.include_router(datasets.router)
 app.include_router(documents.router)
 app.include_router(tasks.router)
-app.include_router(search.router)
+app.include_router(query.router)
 app.include_router(admin.router)
 
 

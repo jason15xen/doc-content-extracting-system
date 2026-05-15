@@ -57,18 +57,18 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
     th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-    td.mono { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+    td.mono, .mono { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
-    .pill.queued { background: #2a2f38; color: var(--muted); }
-    .pill.running { background: #253544; color: var(--accent); }
-    .pill.success { background: #1e3a2a; color: var(--ok); }
+    .pill.queued, .pill.pending { background: #2a2f38; color: var(--muted); }
+    .pill.processing, .pill.running { background: #253544; color: var(--accent); }
+    .pill.completed, .pill.success { background: #1e3a2a; color: var(--ok); }
     .pill.failed { background: #3a1e1e; color: var(--err); }
-    .pill.pending { background: #2a2f38; color: var(--muted); }
-    .pill.processing { background: #253544; color: var(--accent); }
+    .pill.skipped { background: #2f2a1a; color: var(--warn); }
+    .pill.cancelled { background: #2a2f38; color: var(--muted); }
     .progress { display: flex; align-items: center; gap: 8px; }
     .progress-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
     .progress-fill { height: 100%; background: var(--accent); transition: width .3s; }
-    .progress-fill.success { background: var(--ok); }
+    .progress-fill.completed { background: var(--ok); }
     .progress-fill.failed { background: var(--err); }
     .muted { color: var(--muted); font-size: 12px; }
     .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
@@ -78,18 +78,23 @@
     .search-answer { background: #172030; border: 1px solid #253544; padding: 14px; border-radius: 6px; line-height: 1.6; white-space: pre-wrap; margin-bottom: 12px; }
     .empty { text-align: center; color: var(--muted); padding: 32px; font-style: italic; }
     a { color: var(--accent); }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+    .modal.active { display: flex; }
+    .modal-content { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; max-width: 980px; width: 100%; max-height: 90vh; overflow: auto; padding: 20px; position: relative; }
+    .modal-close { position: absolute; top: 10px; right: 10px; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 22px; line-height: 1; padding: 4px 10px; }
+    .modal-close:hover { color: var(--text); }
   </style>
 </head>
 <body>
 
 <header>
   <h1>RAG API Test UI</h1>
-  <span class="sub">for development / manual verification</span>
+  <span class="sub">aligned with the sample-api /doc, /doc/tasks, /doc/status, /query, /datasets contract</span>
 </header>
 
 <nav id="nav">
   <button data-tab="upload" class="active">Upload</button>
-  <button data-tab="search">Search</button>
+  <button data-tab="query">Query</button>
   <button data-tab="documents">Documents</button>
   <button data-tab="datasets">Datasets</button>
   <button data-tab="tasks">Tasks</button>
@@ -113,44 +118,66 @@
           <label>Dataset (optional)</label>
           <select id="upload-dataset"><option value="">— none —</option></select>
         </div>
+      </div>
+      <div class="row">
+        <div style="flex: 2">
+          <label>Description (optional) — applied to every file in this batch</label>
+          <input type="text" id="upload-description" placeholder="e.g. Q4 board pack" />
+        </div>
         <div class="shrink" style="align-self: flex-end">
           <button class="primary" onclick="uploadFiles()">Upload</button>
         </div>
       </div>
-      <div id="upload-result" class="result" style="display:none"></div>
+      <div style="margin-top: 12px;">
+        <div class="toolbar">
+          <label style="margin: 0">items (JSON) — REQUIRED <span class="muted">one entry per uploaded file</span></label>
+          <button class="ghost" onclick="resetItemsEditor()">Auto-fill from selected files</button>
+        </div>
+        <textarea id="upload-items" style="min-height: 110px" placeholder='[{"clientFileId":"original.pdf","id":"doc-001","fileName":"saved_name.pdf"}]'></textarea>
+        <div class="hint">
+          <strong>clientFileId</strong> must equal the actual uploaded filename (server uses it as the join key).
+          <strong>id</strong> is the client-supplied document ID — reuse an existing one to trigger the update path.
+          <strong>fileName</strong> is the target/display name; its extension must match clientFileId.
+        </div>
+      </div>
+      <div id="upload-result" style="display:none; margin-top: 12px;"></div>
       <div id="upload-task-progress" style="display:none; margin-top: 12px;"></div>
     </div>
   </section>
 
-  <!-- SEARCH -->
-  <section id="tab-search">
-    <h2>Search</h2>
+  <!-- QUERY -->
+  <section id="tab-query">
+    <h2>Query</h2>
     <div class="panel">
       <div class="row">
         <div style="flex: 3">
           <label>Query</label>
-          <textarea id="search-query" placeholder="Ask a question about your documents…"></textarea>
+          <textarea id="query-input" placeholder="Ask a question about your documents…"></textarea>
         </div>
       </div>
       <div class="row">
         <div>
           <label>Dataset (optional — omit to search all)</label>
-          <select id="search-dataset"><option value="">— all datasets —</option></select>
+          <select id="query-dataset"><option value="">— all datasets —</option></select>
         </div>
         <div>
-          <label>Top K (max sources)</label>
-          <input type="number" id="search-topk" value="5" min="1" max="20" />
+          <label>
+            <input type="checkbox" id="query-use-cache" checked style="width:auto;margin-right:4px;vertical-align:middle" />
+            use_cache
+          </label>
+          <div class="hint">forwarded to the server (no-op when cache is disabled)</div>
         </div>
         <div class="shrink" style="align-self: flex-end">
-          <button class="primary" onclick="doSearch()">Search</button>
+          <button class="primary" onclick="doQuery()">Query</button>
         </div>
       </div>
     </div>
-    <div id="search-output" style="display:none">
+    <div id="query-output" style="display:none">
       <h2>Answer</h2>
-      <div id="search-answer" class="search-answer"></div>
-      <h2>Sources</h2>
-      <div class="panel" id="search-sources"></div>
+      <div id="query-answer" class="search-answer"></div>
+      <div id="query-meta" class="muted" style="margin: 0 0 16px;"></div>
+      <h2>Source files</h2>
+      <div class="panel" id="query-sources"></div>
     </div>
   </section>
 
@@ -161,9 +188,13 @@
       <div class="toolbar">
         <div>
           <button class="ghost" onclick="loadDocuments()">Refresh</button>
+          <label style="display:inline-block; margin-left: 12px;">Filter by dataset
+            <select id="documents-dataset-filter" onchange="loadDocuments()" style="display:inline-block; width:auto; margin-left:6px">
+              <option value="">— all —</option>
+            </select>
+          </label>
         </div>
         <div>
-          <button class="danger" onclick="deleteFailedDocuments()">Delete failed</button>
           <button class="danger" onclick="deleteAllDocuments()">Delete all</button>
         </div>
       </div>
@@ -199,9 +230,19 @@
       <div class="toolbar">
         <div>
           <button class="ghost" onclick="loadTasks()">Refresh</button>
+          <label style="display:inline-block; margin-left: 12px;">Status
+            <select id="tasks-status-filter" onchange="loadTasks()" style="display:inline-block; width:auto; margin-left:6px">
+              <option value="">— all —</option>
+              <option value="pending">pending</option>
+              <option value="processing">processing</option>
+              <option value="completed">completed</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </label>
         </div>
         <div>
-          <button class="danger" onclick="deleteAllTasks()">Delete all tasks</button>
+          <button class="danger" onclick="clearTaskHistory()">Clear history</button>
         </div>
       </div>
       <div id="tasks-table"></div>
@@ -251,6 +292,13 @@
 
 </main>
 
+<div id="task-modal" class="modal" onclick="closeTaskModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeTaskModal()" aria-label="Close">×</button>
+    <div id="task-modal-body"><div class="muted">loading…</div></div>
+  </div>
+</div>
+
 <script>
 const API = ''; // same origin
 
@@ -271,10 +319,18 @@ document.querySelectorAll('#nav button').forEach(b => {
 // --- helpers ---
 function $(id) { return document.getElementById(id); }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function showResult(el, data, ok = true) {
-  el.style.display = 'block';
-  el.className = 'result ' + (ok ? 'ok' : 'err');
-  el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+function fmtDate(s) { if (!s) return ''; try { return new Date(s).toLocaleString(); } catch { return s; } }
+function fmtTime(s) { if (!s) return ''; try { return new Date(s).toLocaleTimeString(); } catch { return s; } }
+function humanSize(n) {
+  if (n == null) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+function newDocId() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+  return 'doc' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 async function api(path, opts = {}) {
   const r = await fetch(API + path, opts);
@@ -284,106 +340,298 @@ async function api(path, opts = {}) {
   if (!r.ok) throw { status: r.status, body };
   return body;
 }
+function errBox(el, e) {
+  el.innerHTML = `<div class="result err">${esc(typeof e.body === 'string' ? e.body : JSON.stringify(e.body || e, null, 2))}</div>`;
+}
 
 // --- upload ---
 $('upload-files').addEventListener('change', e => {
-  const n = e.target.files.length;
-  $('upload-hint').textContent = n === 0 ? 'No files selected' : `${n} file${n>1?'s':''} selected: ` + Array.from(e.target.files).map(f => f.name).join(', ');
+  const files = e.target.files;
+  const n = files.length;
+  $('upload-hint').textContent = n === 0 ? 'No files selected' : `${n} file${n>1?'s':''} selected: ` + Array.from(files).map(f => f.name).join(', ');
+  // Auto-fill the items textarea only when it's empty — don't clobber
+  // hand-edited JSON when the user changes the file selection.
+  if (n > 0 && !$('upload-items').value.trim()) populateItemsFromFiles(files);
 });
+
+function populateItemsFromFiles(files) {
+  const items = Array.from(files).map(f => ({
+    clientFileId: f.name,
+    id: newDocId(),
+    fileName: f.name,
+  }));
+  $('upload-items').value = JSON.stringify(items, null, 2);
+}
+
+function resetItemsEditor() {
+  const files = $('upload-files').files;
+  if (!files.length) { $('upload-items').value = ''; return; }
+  populateItemsFromFiles(files);
+}
 
 async function uploadFiles() {
   const files = $('upload-files').files;
   if (!files.length) { alert('Select at least one file'); return; }
+
+  const itemsRaw = $('upload-items').value.trim();
+  if (!itemsRaw) { alert('items (JSON) is required. Click "Auto-fill from selected files" or paste your own.'); return; }
+  try {
+    JSON.parse(itemsRaw);
+  } catch (e) {
+    alert('items is not valid JSON: ' + e.message);
+    return;
+  }
+
   const fd = new FormData();
   for (const f of files) fd.append('files', f);
+  fd.append('items', itemsRaw);
+  const desc = $('upload-description').value.trim();
+  if (desc) fd.append('description', desc);
   const ds = $('upload-dataset').value;
-  if (ds) fd.append('dataset_id', ds);
+  if (ds) fd.append('dataset', ds);
 
   const resultEl = $('upload-result');
   resultEl.style.display = 'block';
-  resultEl.className = 'result';
-  resultEl.textContent = 'Uploading…';
+  resultEl.innerHTML = '<div class="result">Uploading…</div>';
+  $('upload-task-progress').style.display = 'none';
+  $('upload-task-progress').innerHTML = '';
 
   try {
-    const resp = await api('/documents/upload', { method: 'POST', body: fd });
-    showResult(resultEl, resp, true);
-    if (resp.task_id) {
-      const box = $('upload-task-progress');
-      box.style.display = 'block';
-      box.innerHTML = `<div class="muted">Ingest task started: <code>${esc(resp.task_id)}</code>. Open the Tasks tab and click Refresh to see progress.</div>`;
-    }
+    const resp = await api('/doc', { method: 'POST', body: fd });
+    renderUploadResult(resultEl, resp);
+    if (resp.task_id) startUploadProgress(resp.task_id);
   } catch (e) {
-    showResult(resultEl, e.body || String(e), false);
+    errBox(resultEl, e);
   }
 }
 
-// --- search ---
-async function doSearch() {
-  const query = $('search-query').value.trim();
-  if (!query) { alert('Enter a query'); return; }
-  const body = { query, top_k: parseInt($('search-topk').value, 10) || 5 };
-  const ds = $('search-dataset').value;
-  if (ds) body.dataset_id = ds;
+function renderUploadResult(container, resp) {
+  const skipped = resp.skipped_files || [];
+  const failed = resp.failed_files || [];
+  const updated = resp.updated_files || [];
+  const queued = resp.total_files - skipped.length - failed.length;
 
-  $('search-output').style.display = 'block';
-  $('search-answer').textContent = 'Searching…';
-  $('search-sources').innerHTML = '';
+  const sections = [];
+
+  sections.push(`
+    <div class="result ok" style="display:flex; gap:18px; align-items:center">
+      <span><strong>${resp.total_files}</strong> total</span>
+      <span style="color:var(--ok)"><strong>${queued}</strong> queued</span>
+      <span style="color:var(--warn)"><strong>${skipped.length}</strong> skipped</span>
+      <span style="color:var(--err)"><strong>${failed.length}</strong> failed</span>
+      ${resp.dataset ? `<span class="muted" style="margin-left:auto">dataset: ${esc(resp.dataset)}</span>` : ''}
+    </div>
+  `);
+
+  if (failed.length) {
+    sections.push(`
+      <h2 style="margin-top:14px">Failed (validation)</h2>
+      <table>
+        <thead><tr><th>File</th><th>docId</th><th>Reason</th></tr></thead>
+        <tbody>${failed.map(f => `
+          <tr>
+            <td>${esc(f.filename)}</td>
+            <td class="mono">${esc(f.docId || '')}</td>
+            <td style="color:var(--err)">${esc(f.reason)}</td>
+          </tr>`).join('')}</tbody>
+      </table>`);
+  }
+
+  if (skipped.length) {
+    sections.push(`
+      <h2 style="margin-top:14px">Skipped (unchanged)</h2>
+      <table>
+        <thead><tr><th>File</th><th>docId</th><th>Reason</th></tr></thead>
+        <tbody>${skipped.map(s => `
+          <tr>
+            <td>${esc(s.filename)}</td>
+            <td class="mono">${esc(s.docId)}</td>
+            <td class="muted">${esc(s.reason)}</td>
+          </tr>`).join('')}</tbody>
+      </table>`);
+  }
+
+  if (updated.length) {
+    sections.push(`
+      <h2 style="margin-top:14px">Updated (replaced existing)</h2>
+      <ul class="muted" style="margin:0; padding-left: 18px">
+        ${updated.map(u => `<li>${esc(u)}</li>`).join('')}
+      </ul>`);
+  }
+
+  sections.push(`
+    <div class="muted" style="margin-top:10px">
+      task_id: <code>${esc(resp.task_id || '')}</code>${resp.status_url ? ` — status: <code>${esc(resp.status_url)}</code>` : ''}
+    </div>
+  `);
+
+  container.innerHTML = sections.join('');
+}
+
+let uploadPollTimer = null;
+function stopUploadPoll() {
+  if (uploadPollTimer) { clearTimeout(uploadPollTimer); uploadPollTimer = null; }
+}
+function startUploadProgress(taskId) {
+  stopUploadPoll();
+  const box = $('upload-task-progress');
+  box.style.display = 'block';
+  const poll = async () => {
+    try {
+      const t = await api('/doc/status/' + taskId);
+      box.innerHTML = renderTaskStatusCard(t);
+      const done = ['completed', 'failed', 'cancelled'].includes(t.status);
+      if (!done) uploadPollTimer = setTimeout(poll, 1500);
+    } catch (e) {
+      box.innerHTML = `<div class="result err">poll failed: ${esc(JSON.stringify(e.body || e))}</div>`;
+    }
+  };
+  poll();
+}
+
+function renderTaskStatusCard(t) {
+  const totalDone = t.processed_files + t.failed_file_count + t.skipped_file_count;
+  const pct = t.total_files > 0 ? Math.round(totalDone / t.total_files * 100) : 0;
+  const klass = t.status === 'completed' ? 'completed' : t.status === 'failed' ? 'failed' : '';
+  const filesRows = (t.files || []).map(f => `
+    <tr>
+      <td>${esc(f.filename)}</td>
+      <td><span class="pill ${f.status}">${esc(f.status)}</span></td>
+      <td class="muted">${esc(f.current_step || '')}</td>
+      <td class="muted">${esc(f.actionType || '')}</td>
+      <td style="color:${f.error?'var(--err)':'var(--muted)'}">${esc(f.error || '')}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="panel" style="margin: 0">
+      <div class="row" style="margin-bottom:8px">
+        <div>
+          <strong>${esc(t.action)}</strong> task <span class="pill ${t.status}">${esc(t.status)}</span>
+          <div class="muted">task_id: <code>${esc(t.task_id)}</code></div>
+        </div>
+        <div class="shrink">
+          ${(t.status === 'pending' || t.status === 'processing')
+            ? `<button class="danger" onclick="cancelTask('${esc(t.task_id)}', false)">Cancel</button>`
+            : ''}
+        </div>
+      </div>
+      <div class="progress">
+        <div class="progress-bar"><div class="progress-fill ${klass}" style="width:${pct}%"></div></div>
+        <span class="muted" style="min-width:44px">${pct}%</span>
+      </div>
+      <div class="muted" style="font-size:11px; margin-top:6px">
+        ${t.processed_files} processed · ${t.failed_file_count} failed · ${t.skipped_file_count} skipped of ${t.total_files} total
+        ${t.current_file ? ` · current: ${esc(t.current_file)} (${esc(t.current_step || '')})` : ''}
+      </div>
+      <div class="muted" style="font-size:11px; margin-top:4px">
+        elapsed ${t.elapsed_seconds}s${t.processing_seconds != null ? ` · processing ${t.processing_seconds}s` : ''}
+      </div>
+      ${filesRows ? `
+        <table style="margin-top:10px">
+          <thead><tr><th>File</th><th>Status</th><th>Step</th><th>Action</th><th>Error</th></tr></thead>
+          <tbody>${filesRows}</tbody>
+        </table>` : ''}
+      ${t.failed_files && t.failed_files.length ? `
+        <h2 style="margin-top:12px; font-size:13px">Failed (${t.failed_files.length})</h2>
+        <table>
+          <thead><tr><th>File</th><th>docId</th><th>Reason</th></tr></thead>
+          <tbody>${t.failed_files.map(f => `
+            <tr><td>${esc(f.filename)}</td><td class="mono">${esc(f.docId || '')}</td><td style="color:var(--err)">${esc(f.reason)}</td></tr>
+          `).join('')}</tbody>
+        </table>` : ''}
+      ${t.skipped_files && t.skipped_files.length ? `
+        <h2 style="margin-top:12px; font-size:13px">Skipped (${t.skipped_files.length})</h2>
+        <table>
+          <thead><tr><th>File</th><th>docId</th><th>Reason</th></tr></thead>
+          <tbody>${t.skipped_files.map(s => `
+            <tr><td>${esc(s.filename)}</td><td class="mono">${esc(s.docId)}</td><td class="muted">${esc(s.reason)}</td></tr>
+          `).join('')}</tbody>
+        </table>` : ''}
+    </div>`;
+}
+
+// --- query ---
+async function doQuery() {
+  const query = $('query-input').value.trim();
+  if (!query) { alert('Enter a query'); return; }
+  const body = { query, use_cache: $('query-use-cache').checked };
+  const ds = $('query-dataset').value;
+  if (ds) body.dataset = ds;
+
+  $('query-output').style.display = 'block';
+  $('query-answer').textContent = 'Querying…';
+  $('query-meta').textContent = '';
+  $('query-sources').innerHTML = '';
 
   try {
-    const resp = await api('/search', {
+    const resp = await api('/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    $('search-answer').textContent = resp.answer || '(no answer)';
-    if (!resp.sources || !resp.sources.length) {
-      $('search-sources').innerHTML = '<div class="empty">No sources.</div>';
+    $('query-answer').textContent = resp.answer || '(no answer)';
+    const meta = [];
+    if (resp.from_cache) meta.push('from cache');
+    if (resp.dataset) meta.push(`dataset: ${resp.dataset}`);
+    if (resp.token_usage) meta.push(`tokens: prompt ${resp.token_usage.prompt_tokens} / completion ${resp.token_usage.completion_tokens} / total ${resp.token_usage.total_tokens}`);
+    $('query-meta').textContent = meta.join(' · ');
+
+    if (!resp.files || !resp.files.length) {
+      $('query-sources').innerHTML = '<div class="empty">No source files.</div>';
       return;
     }
-    $('search-sources').innerHTML = `
+    $('query-sources').innerHTML = `
       <table>
-        <thead><tr><th>#</th><th>Document</th><th>Score</th><th>doc_id</th></tr></thead>
+        <thead><tr><th>#</th><th>Document</th><th>Relevance</th><th>Dataset</th><th>id</th></tr></thead>
         <tbody>
-          ${resp.sources.map((s, i) => `
+          ${resp.files.map((f, i) => `
             <tr>
               <td>${i+1}</td>
-              <td>${esc(s.doc_name)}</td>
-              <td>${(+s.score).toFixed(3)}</td>
-              <td class="mono">${s.doc_id}</td>
+              <td>${esc(f.name)}</td>
+              <td>${f.relevance_score != null ? (+f.relevance_score).toFixed(2) + '%' : '—'}</td>
+              <td class="muted">${esc(f.dataset_name || f.dataset_id || '—')}</td>
+              <td class="mono">${esc(f.id)}</td>
             </tr>
           `).join('')}
         </tbody>
       </table>
     `;
   } catch (e) {
-    $('search-answer').textContent = '';
-    $('search-sources').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+    $('query-answer').textContent = '';
+    errBox($('query-sources'), e);
   }
 }
 
 // --- datasets ---
 async function loadDatasets() {
   try {
-    const rows = await api('/datasets');
-    // populate dropdowns too
-    const opts = ['<option value="">— none —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`));
-    $('upload-dataset').innerHTML = opts.join('');
-    $('search-dataset').innerHTML = ['<option value="">— all datasets —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`)).join('');
+    const resp = await api('/datasets');
+    const rows = resp.datasets || [];
+    const dsOpts = ['<option value="">— none —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`));
+    $('upload-dataset').innerHTML = dsOpts.join('');
+    $('query-dataset').innerHTML = ['<option value="">— all datasets —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`)).join('');
+    $('documents-dataset-filter').innerHTML = ['<option value="">— all —</option>'].concat(rows.map(d => `<option value="${d.id}">${esc(d.name)}</option>`)).join('');
+
     if (!rows.length) { $('datasets-table').innerHTML = '<div class="empty">No datasets yet.</div>'; return; }
     $('datasets-table').innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Description</th><th>Created</th><th>ID</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Description</th><th>Docs</th><th>Created</th><th>ID</th><th></th></tr></thead>
         <tbody>${rows.map(d => `
-          <tr>
+          <tr id="ds-row-${d.id}">
             <td>${esc(d.name)}</td>
             <td>${esc(d.description || '')}</td>
-            <td class="muted">${new Date(d.created_at).toLocaleString()}</td>
+            <td>${d.document_count ?? '—'}</td>
+            <td class="muted">${fmtDate(d.created_at)}</td>
             <td class="mono">${d.id}</td>
-            <td><button class="danger" onclick="deleteDataset('${d.id}', '${esc(d.name)}')">Delete</button></td>
+            <td>
+              <button class="ghost" onclick='editDataset(${JSON.stringify(d).replace(/'/g, "&#39;")})'>Edit</button>
+              <button class="ghost" onclick="deleteDataset('${d.id}', '${esc(d.name)}', true)">Keep docs</button>
+              <button class="danger" onclick="deleteDataset('${d.id}', '${esc(d.name)}', false)">Delete +docs</button>
+            </td>
           </tr>`).join('')}</tbody>
       </table>`;
   } catch (e) {
-    $('datasets-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+    errBox($('datasets-table'), e);
   }
 }
 async function createDataset() {
@@ -400,78 +648,74 @@ async function createDataset() {
     loadDatasets();
   } catch (e) { alert(JSON.stringify(e.body || e)); }
 }
-async function deleteDataset(id, name) {
-  if (!confirm(`Delete dataset "${name}" and cascade-delete all its documents?`)) return;
+function editDataset(d) {
+  const row = $('ds-row-' + d.id);
+  if (!row) return;
+  row.innerHTML = `
+    <td><input type="text" id="ds-edit-name-${d.id}" value="${esc(d.name)}" /></td>
+    <td colspan="3"><input type="text" id="ds-edit-desc-${d.id}" value="${esc(d.description || '')}" placeholder="(optional)" /></td>
+    <td class="mono">${d.id}</td>
+    <td>
+      <button class="primary" onclick="saveDataset('${d.id}')">Save</button>
+      <button class="ghost" onclick="loadDatasets()">Cancel</button>
+    </td>`;
+  $('ds-edit-name-' + d.id).focus();
+}
+async function saveDataset(id) {
+  const name = $('ds-edit-name-' + id).value.trim();
+  const desc = $('ds-edit-desc-' + id).value;
+  if (!name) { alert('Name is required'); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('description', desc);
   try {
-    await api('/datasets/' + id, { method: 'DELETE' });
+    await api('/datasets/' + id, { method: 'PUT', body: fd });
+    loadDatasets();
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function deleteDataset(id, name, keepDocs) {
+  const verb = keepDocs ? 'Delete dataset (documents will remain, unassigned)' : 'CASCADE delete dataset AND all its documents';
+  if (!confirm(`${verb}: "${name}"?`)) return;
+  try {
+    await api(`/datasets/${id}?keep_documents=${keepDocs ? 'true' : 'false'}`, { method: 'DELETE' });
     loadDatasets();
   } catch (e) { alert(JSON.stringify(e.body || e)); }
 }
 
 // --- documents ---
-// Pagination state for the Documents tab. Persists across Refresh clicks so
-// the user stays on the page they were viewing; resets only when explicitly
-// jumping to page 1.
-const DOCUMENTS_PAGE_SIZE = 50;
-let documentsOffset = 0;
-
 async function loadDocuments() {
   try {
-    if (documentsOffset < 0) documentsOffset = 0;
-    const resp = await api(`/documents?limit=${DOCUMENTS_PAGE_SIZE}&offset=${documentsOffset}`);
-    const items = resp.items || [];
-    const total = resp.meta?.total ?? 0;
+    const ds = $('documents-dataset-filter').value;
+    const path = '/doc?limit=200' + (ds ? `&dataset=${encodeURIComponent(ds)}` : '');
+    const resp = await api(path);
+    const items = resp.documents || [];
 
-    // Snap-back: deletes can shrink `total` below the current offset, leaving
-    // an empty page. Jump to the last valid page and re-fetch once.
-    if (!items.length && total > 0 && documentsOffset > 0) {
-      documentsOffset = Math.max(0, Math.floor((total - 1) / DOCUMENTS_PAGE_SIZE) * DOCUMENTS_PAGE_SIZE);
-      return loadDocuments();
-    }
-
-    if (!total) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
-
-    const start = documentsOffset + 1;
-    const end = documentsOffset + items.length;
-    const hasPrev = documentsOffset > 0;
-    const hasNext = end < total;
+    if (!items.length) { $('documents-table').innerHTML = '<div class="empty">No documents.</div>'; return; }
 
     $('documents-table').innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Status</th><th>Chunks</th><th>Dataset</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Status</th><th>Size</th><th>Dataset</th><th>Description</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
         <tbody>${items.map(d => `
           <tr>
             <td>${esc(d.name)}</td>
-            <td><span class="pill ${d.status}">${d.status}</span></td>
-            <td>${d.chunk_count}</td>
-            <td class="mono">${d.dataset_id || '—'}</td>
-            <td class="muted">${new Date(d.uploaded_at).toLocaleString()}</td>
-            <td class="mono">${d.id}</td>
-            <td><button class="danger" onclick="deleteDoc('${d.id}')">Delete</button></td>
+            <td><span class="pill ${d.status}">${esc(d.status)}</span></td>
+            <td class="muted">${humanSize(d.file_size)}</td>
+            <td class="muted">${esc(d.dataset_name || d.dataset_id || '—')}</td>
+            <td class="muted">${esc(d.description || '')}</td>
+            <td class="muted">${fmtDate(d.uploaded_date)}</td>
+            <td class="mono">${esc(d.id)}</td>
+            <td><button class="danger" onclick="deleteDoc('${esc(d.id)}')">Delete</button></td>
           </tr>`).join('')}</tbody>
       </table>
-      <div class="muted" style="margin-top:8px; display:flex; align-items:center; gap:8px;">
-        <button class="ghost" onclick="documentsPrev()" ${hasPrev ? '' : 'disabled'}>‹ Prev</button>
-        <span>Showing ${start}-${end} of ${total}</span>
-        <button class="ghost" onclick="documentsNext()" ${hasNext ? '' : 'disabled'}>Next ›</button>
-      </div>`;
+      <div class="muted" style="margin-top:8px">Showing ${items.length} of ${resp.total_count} documents${resp.dataset ? ` (dataset filter active)` : ''}.</div>`;
   } catch (e) {
-    $('documents-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+    errBox($('documents-table'), e);
   }
-}
-
-function documentsPrev() {
-  documentsOffset = Math.max(0, documentsOffset - DOCUMENTS_PAGE_SIZE);
-  loadDocuments();
-}
-function documentsNext() {
-  documentsOffset += DOCUMENTS_PAGE_SIZE;
-  loadDocuments();
 }
 async function deleteDoc(id) {
   if (!confirm('Delete this document?')) return;
   try {
-    await api('/documents', {
+    await api('/doc', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ doc_ids: [id] }),
@@ -482,37 +726,7 @@ async function deleteDoc(id) {
 async function deleteAllDocuments() {
   if (!confirm('Delete ALL documents? This also removes chunks from Azure AI Search.')) return;
   try {
-    await api('/documents/all', { method: 'DELETE' });
-    setTimeout(loadDocuments, 400);
-  } catch (e) { alert(JSON.stringify(e.body || e)); }
-}
-async function deleteFailedDocuments() {
-  // Collect all failed doc ids first. The list endpoint caps `limit` at 200
-  // server-side, so we page through until exhausted — handles batches that
-  // had hundreds of scan-rejected docs in one run.
-  let ids = [];
-  let offset = 0;
-  const pageSize = 200;
-  try {
-    while (true) {
-      const resp = await api(`/documents?status_filter=failed&limit=${pageSize}&offset=${offset}`);
-      if (!resp.items.length) break;
-      ids = ids.concat(resp.items.map(d => d.id));
-      if (resp.items.length < pageSize) break;
-      offset += pageSize;
-    }
-  } catch (e) {
-    alert('Failed to list failed docs: ' + JSON.stringify(e.body || e));
-    return;
-  }
-  if (ids.length === 0) { alert('No failed documents to delete.'); return; }
-  if (!confirm(`Delete ${ids.length} failed document${ids.length === 1 ? '' : 's'}? This also removes their chunks from Azure AI Search.`)) return;
-  try {
-    await api('/documents', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ doc_ids: ids }),
-    });
+    await api('/doc/all', { method: 'DELETE' });
     setTimeout(loadDocuments, 400);
   } catch (e) { alert(JSON.stringify(e.body || e)); }
 }
@@ -520,54 +734,77 @@ async function deleteFailedDocuments() {
 // --- tasks ---
 async function loadTasks() {
   try {
-    const resp = await api('/tasks?limit=50');
-    if (!resp.items.length) { $('tasks-table').innerHTML = '<div class="empty">No tasks.</div>'; return; }
+    const sf = $('tasks-status-filter').value;
+    const path = '/doc/tasks?limit=200' + (sf ? `&status_filter=${encodeURIComponent(sf)}` : '');
+    const resp = await api(path);
+    const rows = resp.tasks || [];
+    if (!rows.length) { $('tasks-table').innerHTML = '<div class="empty">No tasks.</div>'; return; }
     $('tasks-table').innerHTML = `
       <table>
-        <thead><tr><th>Type</th><th>Status</th><th>Progress</th><th>Result</th><th>Time</th><th>Created</th><th>ID</th><th></th></tr></thead>
-        <tbody>${resp.items.map(t => {
-          const pct = t.progress || 0;
-          const klass = t.status === 'success' ? 'success' : t.status === 'failed' ? 'failed' : '';
+        <thead><tr><th>Action</th><th>Status</th><th>Progress</th><th>Created</th><th>task_id</th><th></th></tr></thead>
+        <tbody>${rows.map(t => {
+          const totalDone = t.processed_files + t.failed_file_count;
+          const pct = t.total_files > 0 ? Math.round(totalDone / t.total_files * 100) : 0;
+          const klass = t.status === 'completed' ? 'completed' : t.status === 'failed' ? 'failed' : '';
           return `
           <tr>
-            <td>${esc(t.task_type)}</td>
-            <td><span class="pill ${t.status}">${t.status}</span></td>
+            <td>${esc(t.action)}</td>
+            <td><span class="pill ${t.status}">${esc(t.status)}</span></td>
             <td style="min-width: 200px">
               <div class="progress">
                 <div class="progress-bar"><div class="progress-fill ${klass}" style="width:${pct}%"></div></div>
                 <span class="muted" style="min-width:44px">${pct}%</span>
               </div>
-              <div class="muted" style="font-size:11px">${t.processed_items}/${t.total_items} items</div>
+              <div class="muted" style="font-size:11px">${t.processed_files} ok · ${t.failed_file_count} failed / ${t.total_files} total</div>
             </td>
-            <td class="muted">${esc(t.result || '')}</td>
-            <td class="muted">${t.processed_time}s</td>
-            <td class="muted">${new Date(t.created_at).toLocaleTimeString()}</td>
-            <td class="mono">${t.id.slice(0, 8)}…</td>
-            <td><button class="danger" onclick="deleteTask('${t.id}')">Delete</button></td>
+            <td class="muted">${fmtTime(t.created_at)}</td>
+            <td class="mono">${esc(t.task_id)}</td>
+            <td>
+              <button class="ghost" onclick="viewTask('${esc(t.task_id)}')">View</button>
+              ${(t.status === 'pending' || t.status === 'processing')
+                ? `<button class="danger" onclick="cancelTask('${esc(t.task_id)}', true)">Cancel</button>` : ''}
+            </td>
           </tr>`;
         }).join('')}</tbody>
-      </table>`;
+      </table>
+      <div class="muted" style="margin-top:8px">${resp.total_tasks} task${resp.total_tasks === 1 ? '' : 's'} total${sf ? ` (filter: ${sf})` : ''}.</div>`;
   } catch (e) {
-    $('tasks-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+    errBox($('tasks-table'), e);
   }
 }
-async function deleteTask(id) {
-  try { await api('/tasks/' + id, { method: 'DELETE' }); loadTasks(); }
-  catch (e) { alert(JSON.stringify(e.body || e)); }
+async function viewTask(id) {
+  const modal = $('task-modal');
+  const body = $('task-modal-body');
+  body.innerHTML = '<div class="muted">loading…</div>';
+  modal.classList.add('active');
+  try {
+    const t = await api('/doc/status/' + id);
+    body.innerHTML = renderTaskStatusCard(t);
+  } catch (e) {
+    body.innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e))}</div>`;
+  }
 }
-async function deleteAllTasks() {
-  if (!confirm('Delete ALL task records?')) return;
-  try { await api('/tasks', { method: 'DELETE' }); loadTasks(); }
-  catch (e) { alert(JSON.stringify(e.body || e)); }
+function closeTaskModal(e) {
+  if (e && e.target !== $('task-modal') && !e.target.classList.contains('modal-close')) return;
+  $('task-modal').classList.remove('active');
 }
-// --- logs ---
-function humanSize(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') $('task-modal').classList.remove('active');
+});
+async function cancelTask(id, reload) {
+  if (!confirm('Cancel this task? In-flight files will complete; pending files abort.')) return;
+  try {
+    const r = await api('/doc/tasks/' + id + '/cancel', { method: 'POST' });
+    if (reload) loadTasks(); else $('upload-task-progress').innerHTML = `<div class="result ok">${esc(r.message)}</div>`;
+  } catch (e) { alert(JSON.stringify(e.body || e)); }
+}
+async function clearTaskHistory() {
+  if (!confirm('Clear completed/failed/cancelled tasks?')) return;
+  try { await api('/doc/tasks', { method: 'DELETE' }); loadTasks(); }
+  catch (e) { alert(JSON.stringify(e.body || e)); }
 }
 
+// --- logs ---
 async function loadLogs() {
   try {
     const rows = await api('/admin/logs');
@@ -582,12 +819,12 @@ async function loadLogs() {
           <tr>
             <td>${esc(r.name)}</td>
             <td>${humanSize(r.size_bytes)}</td>
-            <td class="muted">${new Date(r.modified_at).toLocaleString()}</td>
+            <td class="muted">${fmtDate(r.modified_at)}</td>
             <td><a class="ghost" style="text-decoration:none" href="/admin/logs/${encodeURIComponent(r.name)}" download>Download</a></td>
           </tr>`).join('')}</tbody>
       </table>`;
   } catch (e) {
-    $('logs-table').innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+    errBox($('logs-table'), e);
   }
 }
 
@@ -600,7 +837,7 @@ async function adminCleanup(kind) {
     const r = await api('/admin/cleanup/' + kind, { method: 'POST' });
     el.innerHTML = `<div class="result ok">${esc(JSON.stringify(r, null, 2))}</div>`;
   } catch (e) {
-    el.innerHTML = `<div class="result err">${esc(JSON.stringify(e.body || e, null, 2))}</div>`;
+    errBox(el, e);
   }
 }
 

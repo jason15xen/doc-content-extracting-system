@@ -1,31 +1,35 @@
-import uuid
-from typing import Literal
-
-from pydantic import BaseModel, computed_field
+"""Upload request/response shapes — matches sample-api `POST /doc`."""
+from pydantic import BaseModel, Field
 
 
-class UploadAcceptedItem(BaseModel):
+class UploadItemMetadata(BaseModel):
+    """One entry inside the `items` JSON form field for `POST /doc`."""
+
+    clientFileId: str = Field(description="Must equal an uploaded file's filename")
+    id: str = Field(description="Client-supplied document ID")
+    fileName: str = Field(description="Target/display filename; extension must match clientFileId")
+
+
+class SkippedFileInfo(BaseModel):
     filename: str
-    status: Literal["accepted", "failed"]
-    reason: str | None = None
-    document_id: uuid.UUID | None = None
+    docId: str
+    reason: str
 
 
-class UploadResponse(BaseModel):
-    task_id: uuid.UUID | None = None  # null when every file failed validation
-    items: list[UploadAcceptedItem]
+class FailedFileInfo(BaseModel):
+    filename: str
+    docId: str | None = None
+    reason: str
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def total(self) -> int:
-        return len(self.items)
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def accepted(self) -> int:
-        return sum(1 for i in self.items if i.status == "accepted")
+class AsyncUploadResponse(BaseModel):
+    """Response for `POST /doc`."""
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def failed(self) -> int:
-        return sum(1 for i in self.items if i.status == "failed")
+    task_id: str
+    message: str
+    status_url: str
+    total_files: int
+    skipped_files: list[SkippedFileInfo] = Field(default_factory=list)
+    failed_files: list[FailedFileInfo] = Field(default_factory=list)
+    updated_files: list[str] = Field(default_factory=list)
+    dataset: str | None = None

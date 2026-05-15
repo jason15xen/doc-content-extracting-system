@@ -9,45 +9,41 @@ from datetime import datetime, timezone
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import update
 
-from app.db.models import Document, DocumentStatus, PipelineStage, Task, TaskStatus
+from app.db.models import (
+    Document,
+    DocumentStatus,
+    ProcessingStep,
+    TaskFile,
+    TaskFileAction,
+    TaskFileStatus,
+)
 from app.errors import EmbeddingError, PipelineError
 from app.extraction.dispatcher import get_extractor
 from app.pipeline.context import PipelineContext, get_context
 from app.repositories import documents as documents_repo
+from app.repositories import task_files as task_files_repo
 from app.repositories import tasks as tasks_repo
 from app.services.chunker import chunk_text
 
 _LOG = logging.getLogger("app.ingest")
 
 
-async def run_ingest_task(
-    task_id: uuid.UUID, doc_ids: Sequence[uuid.UUID]
-) -> None:
+async def run_ingest_task(task_id: uuid.UUID, doc_ids: Sequence[str]) -> None:
     ctx = get_context()
     await _run(ctx, task_id, list(doc_ids))
 
 
 async def _run(
-    ctx: PipelineContext, task_id: uuid.UUID, doc_ids: list[uuid.UUID]
+    ctx: PipelineContext, task_id: uuid.UUID, doc_ids: list[str]
 ) -> None:
-    # Mark the task as running (one session, one short-lived transaction).
     async with ctx.sessionmaker() as session:
         task = await tasks_repo.get(session, task_id)
         if task is None:
             _LOG.warning("ingest task %s vanished before start", task_id)
             return
-        await tasks_repo.update_stage_status(
-            session, task, stage=PipelineStage.UPLOADED, status=TaskStatus.RUNNING
-        )
+        await tasks_repo.mark_started(session, task_id)
         await session.commit()
 
-    # Process largest docs first (LPT scheduling). The dominant tail in a
-    # mixed batch is the biggest doc; starting it at t=0 alongside the rest
-    # of the workers lets it run in parallel with the smaller docs instead of
-    # as a serial caboose, cutting total wall-clock roughly in half on the
-    # typical "many small + one giant" workload. Failures to stat (missing or
-    # unreadable file) still sort last; the per-doc pipeline surfaces the
-    # real error.
     doc_ids = await _sort_doc_ids_by_size(ctx, doc_ids)
 
     started_at = time.perf_counter()
@@ -61,16 +57,11 @@ async def _run(
     failed_ids: list[str] = []
     failed_lock = asyncio.Lock()
 
-    async def record_failure(doc_id: uuid.UUID, exc: BaseException) -> None:
+    async def record_failure(doc_id: str, exc: BaseException) -> None:
         async with failed_lock:
             failed_ids.append(f"{doc_id}:{type(exc).__name__}: {exc}")
 
-    async def process_one(doc_id: uuid.UUID) -> None:
-        # The shared ingest_semaphore governs GLOBAL concurrency across all
-        # in-flight tasks (not just this request's docs), so the Azure OpenAI
-        # / Azure Search / CPU load stays bounded regardless of how many
-        # upload requests arrive in parallel. _ingest_one manages its own
-        # short-lived sessions internally; nothing is held here.
+    async def process_one(doc_id: str) -> None:
         doc_start = time.perf_counter()
         try:
             async with ctx.ingest_semaphore:
@@ -94,24 +85,22 @@ async def _run(
             _LOG.error("doc %s setup failed: %s", doc_id, exc, exc_info=True)
             await record_failure(doc_id, exc)
 
-        # Progress bump runs on its own short session after the doc pipeline
-        # has released its session. Never let a failed bump kill the pipeline
-        # — the worst case is a slightly stale processed_items counter, and
-        # the finalize block below will still run.
+        # Progress bump after each doc — counts processed_files OR
+        # failed_file_count based on outcome. Best-effort; a failed bump
+        # won't kill the pipeline.
         try:
             async with ctx.sessionmaker() as ps:
-                pt = await tasks_repo.get(ps, task_id)
-                if pt is not None:
-                    await tasks_repo.bump_processed(ps, pt)
-                    await ps.commit()
+                if any(f.startswith(f"{doc_id}:") for f in failed_ids):
+                    await tasks_repo.bump_failed(ps, task_id)
+                else:
+                    await tasks_repo.bump_processed(ps, task_id)
+                await ps.commit()
         except Exception:
             _LOG.exception(
                 "progress bump failed for task %s doc %s", task_id, doc_id
             )
 
     try:
-        # return_exceptions=True guarantees gather waits for every doc and
-        # surfaces no exception — finalization below always runs.
         await asyncio.gather(
             *(process_one(d) for d in doc_ids), return_exceptions=True
         )
@@ -126,87 +115,110 @@ async def _run(
             elapsed_s,
         )
     finally:
-        # Finalize task status. Wrapped so that no matter what happened
-        # above, the task never stays stuck in RUNNING.
         try:
             async with ctx.sessionmaker() as session:
-                task = await tasks_repo.get(session, task_id)
-                if task is not None:
-                    # Always SUCCESS at the task level — per-doc failures are
-                    # visible on Document rows in the documents list, and the
-                    # "N/M ok, K failed" line is preserved in the file log
-                    # above. A partial-failure batch shouldn't surface as a
-                    # red "failed" task in the UI when most docs indexed fine.
-                    await tasks_repo.update_stage_status(
-                        session,
-                        task,
-                        stage=PipelineStage.INDEXED,
-                        status=TaskStatus.SUCCESS,
-                    )
-                    await session.commit()
+                # Task is `completed` as long as the batch ran to the end —
+                # per-file failures are visible in task_files. Matches sample
+                # behaviour where the overall task succeeds even with some
+                # failed documents.
+                await tasks_repo.mark_completed(session, task_id)
+                await session.commit()
         except Exception:
-            # Last resort — swallow so the background task doesn't die with
-            # an unhandled exception. The task row may remain in RUNNING in
-            # this extreme case, but reconcile_running_tasks sweeps it on
-            # the next boot. Log so the cause is recoverable from the file.
             _LOG.exception("ingest task %s finalize failed", task_id)
 
 
 async def _ingest_one(
     ctx: PipelineContext,
     task_id: uuid.UUID,
-    doc_id: uuid.UUID,
+    doc_id: str,
 ) -> None:
-    # Phase 1: load + mark PROCESSING. Short session so we don't pin a SQLite
-    # connection across the minutes-long extract/embed phase below — that
-    # would surface as "database is locked" on other workers' writes when
-    # busy_timeout drains.
     async with ctx.sessionmaker() as session:
         document = await documents_repo.get(session, doc_id)
         if document is None:
             raise PipelineError("uploaded", "document row missing")
+        task_file = await task_files_repo.get_by_task_and_doc(
+            session, task_id, doc_id
+        )
+        action_type = task_file.action_type if task_file else TaskFileAction.CREATE.value
+
         document.status = DocumentStatus.PROCESSING.value
+        await task_files_repo.set_progress(
+            session,
+            task_id,
+            doc_id,
+            status=TaskFileStatus.PROCESSING.value,
+            current_step=ProcessingStep.EXTRACTING.value,
+        )
+        await tasks_repo.set_current(
+            session,
+            task_id,
+            current_file=document.name,
+            current_step=ProcessingStep.EXTRACTING.value,
+        )
         await session.commit()
-        # Snapshot the fields the rest of the pipeline needs before the
-        # session closes and the ORM instance becomes detached.
+
         doc_name = document.name
         doc_storage_path = document.storage_path
         doc_dataset_id = document.dataset_id
         doc_uploaded_at = document.uploaded_at
 
-    current_stage = PipelineStage.UPLOADED
+    current_step = ProcessingStep.EXTRACTING
     try:
-        # Phase 2: extract / chunk / embed — NO DB session held.
-        current_stage = PipelineStage.EXTRACTED
+        # If this is an update of an existing doc, clear out the old chunks
+        # from Azure Search first so re-indexing doesn't leave stale chunks
+        # behind (the new chunk count may be smaller than the old one).
+        if action_type == TaskFileAction.UPDATE.value:
+            await ctx.search.delete_by_doc_ids([doc_id])
+
         chunks, vectors = await _extract_chunk_embed(
-            ctx, doc_id, doc_name, doc_storage_path
+            ctx, task_id, doc_id, doc_name, doc_storage_path
         )
 
-        # Phase 3: Azure Search upsert + final DB write — fresh session.
-        current_stage = PipelineStage.INDEXED
+        current_step = ProcessingStep.INDEXING
         async with ctx.sessionmaker() as session:
-            await _upsert_and_finalize(
-                ctx,
-                doc_id=doc_id,
-                doc_name=doc_name,
-                dataset_id=doc_dataset_id,
-                uploaded_at=doc_uploaded_at,
-                chunks=chunks,
-                vectors=vectors,
-                session=session,
-                task_id=task_id,
+            await task_files_repo.set_progress(
+                session,
+                task_id,
+                doc_id,
+                current_step=ProcessingStep.INDEXING.value,
             )
+            await session.commit()
+
+        await _upsert_chunks(
+            ctx,
+            doc_id=doc_id,
+            doc_name=doc_name,
+            dataset_id=doc_dataset_id,
+            uploaded_at=doc_uploaded_at,
+            chunks=chunks,
+            vectors=vectors,
+        )
+
+        async with ctx.sessionmaker() as session:
+            await session.execute(
+                update(Document)
+                .where(Document.id == doc_id)
+                .values(
+                    status=DocumentStatus.SUCCESS.value,
+                    storage_path=None,
+                    chunk_count=len(chunks),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await task_files_repo.set_progress(
+                session,
+                task_id,
+                doc_id,
+                status=TaskFileStatus.COMPLETED.value,
+                current_step=ProcessingStep.COMPLETED.value,
+            )
+            await session.commit()
+
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
+        step_value = current_step.value
         if isinstance(exc, PipelineError) and exc.stage:
-            try:
-                current_stage = PipelineStage(exc.stage)
-            except ValueError:
-                pass
-        # Recovery uses a fresh session — no pending ORM state from the
-        # failed run to autoflush, no stale write transaction to fight.
-        # storage_path is cleared here too because the temp file is unlinked
-        # in the finally block below regardless of outcome.
+            step_value = exc.stage
         try:
             async with ctx.sessionmaker() as recovery:
                 await recovery.execute(
@@ -215,31 +227,26 @@ async def _ingest_one(
                     .values(
                         status=DocumentStatus.FAILED.value,
                         storage_path=None,
-                    )
-                )
-                await recovery.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(
-                        stage=current_stage.value,
-                        error_message=msg[:2000],
                         updated_at=datetime.now(timezone.utc),
                     )
                 )
+                await task_files_repo.set_progress(
+                    recovery,
+                    task_id,
+                    doc_id,
+                    status=TaskFileStatus.FAILED.value,
+                    current_step=step_value,
+                    error=msg,
+                    error_details={"step": step_value, "reason": str(exc)},
+                )
                 await recovery.commit()
         except Exception:
-            # Best-effort. If even the fresh-session recovery fails,
-            # reconcile_running_tasks at the next boot will flip the doc/task
-            # to FAILED. Don't let recovery failure shadow the original exc.
             _LOG.exception(
-                "recovery write failed for doc %s; deferring to reconcile_running_tasks",
+                "recovery write failed for doc %s; deferring to reconcile",
                 doc_id,
             )
         raise
     finally:
-        # Source bytes live in an OS temp file by design — never under
-        # storage/uploads. Unlink unconditionally so success and failure both
-        # leave nothing behind.
         if doc_storage_path:
             try:
                 os.unlink(doc_storage_path)
@@ -249,16 +256,13 @@ async def _ingest_one(
 
 async def _extract_chunk_embed(
     ctx: PipelineContext,
-    doc_id: uuid.UUID,
+    task_id: uuid.UUID,
+    doc_id: str,
     doc_name: str,
     storage_path: str | None,
 ) -> tuple[list[str], list[list[float]]]:
-    """Extract → chunk → embed. Holds no DB session — the orchestrator
-    releases the session before calling this so the minutes-long extract /
-    embed work doesn't pin a SQLite connection and starve other workers'
-    writes."""
     if storage_path is None:
-        raise PipelineError("extracted", "storage path missing")
+        raise PipelineError(ProcessingStep.EXTRACTING.value, "storage path missing")
 
     ext = os.path.splitext(doc_name)[1].lower()
     extractor = get_extractor(ext, ctx)
@@ -267,7 +271,7 @@ async def _extract_chunk_embed(
     result = await run_in_threadpool(extractor.extract, storage_path, doc_name)
     plain_text: str = (result.get("plain_text") or "").strip()
     if not plain_text:
-        raise PipelineError("extracted", "empty extraction")
+        raise PipelineError(ProcessingStep.EXTRACTING.value, "empty extraction")
     _LOG.info(
         "doc %s extracted: %s, %d chars in %.1fms",
         doc_id,
@@ -275,6 +279,12 @@ async def _extract_chunk_embed(
         len(plain_text),
         (time.perf_counter() - t0) * 1000.0,
     )
+
+    async with ctx.sessionmaker() as session:
+        await task_files_repo.set_progress(
+            session, task_id, doc_id, current_step=ProcessingStep.CHUNKING.value
+        )
+        await session.commit()
 
     t0 = time.perf_counter()
     chunks = await run_in_threadpool(
@@ -284,13 +294,19 @@ async def _extract_chunk_embed(
         overlap=ctx.settings.chunk_overlap,
     )
     if not chunks:
-        raise PipelineError("chunked", "no chunks produced")
+        raise PipelineError(ProcessingStep.CHUNKING.value, "no chunks produced")
     _LOG.info(
         "doc %s chunked: %d chunks in %.1fms",
         doc_id,
         len(chunks),
         (time.perf_counter() - t0) * 1000.0,
     )
+
+    async with ctx.sessionmaker() as session:
+        await task_files_repo.set_progress(
+            session, task_id, doc_id, current_step=ProcessingStep.EMBEDDING.value
+        )
+        await session.commit()
 
     t0 = time.perf_counter()
     vectors = await ctx.embedder.embed_many(chunks)
@@ -307,17 +323,15 @@ async def _extract_chunk_embed(
     return chunks, vectors
 
 
-async def _upsert_and_finalize(
+async def _upsert_chunks(
     ctx: PipelineContext,
     *,
-    doc_id: uuid.UUID,
+    doc_id: str,
     doc_name: str,
-    dataset_id: uuid.UUID | None,
+    dataset_id,
     uploaded_at: datetime,
     chunks: list[str],
     vectors: list[list[float]],
-    session,
-    task_id: uuid.UUID,
 ) -> None:
     uploaded_iso = uploaded_at.isoformat()
     search_docs = [
@@ -335,25 +349,10 @@ async def _upsert_and_finalize(
     ]
     await ctx.search.upsert_chunks(search_docs)
 
-    # Raw UPDATEs by PK — no ORM identity-map needed across sessions. Single
-    # short write transaction: doc + task in one shot, then commit. The
-    # source temp file is unlinked by the orchestrator's finally block.
-    await session.execute(
-        update(Document)
-        .where(Document.id == doc_id)
-        .values(
-            status=DocumentStatus.SUCCESS.value,
-            storage_path=None,
-            chunk_count=len(chunks),
-        )
-    )
-    await _set_stage(session, task_id, PipelineStage.INDEXED)
-    await session.commit()
-
 
 async def _sort_doc_ids_by_size(
-    ctx: PipelineContext, doc_ids: list[uuid.UUID]
-) -> list[uuid.UUID]:
+    ctx: PipelineContext, doc_ids: list[str]
+) -> list[str]:
     if len(doc_ids) <= 1:
         return doc_ids
     try:
@@ -364,7 +363,7 @@ async def _sort_doc_ids_by_size(
         return doc_ids
 
     _MISSING = -1
-    sizes: dict[uuid.UUID, int] = {}
+    sizes: dict[str, int] = {}
     for d in docs:
         size = _MISSING
         if d.storage_path:
@@ -373,25 +372,10 @@ async def _sort_doc_ids_by_size(
             except OSError:
                 pass
         sizes[d.id] = size
-    # Largest present files first; missing files sort to the very end so the
-    # per-doc pipeline can surface the real error after the real work is done.
     return sorted(
         doc_ids,
         key=lambda did: (
             sizes.get(did, _MISSING) < 0,
             -sizes.get(did, _MISSING),
         ),
-    )
-
-
-async def _set_stage(session, task_id: uuid.UUID, stage: PipelineStage) -> None:
-    """Update the task's stage marker via an atomic SQL UPDATE — concurrent
-    stage updates across parallel docs all funnel into row-level writes
-    that the DB serializes safely (last-writer-wins on the value, but no
-    in-memory ORM races). The previous load-modify-save pattern would race
-    on the same in-memory Task object across coroutines."""
-    await session.execute(
-        update(Task)
-        .where(Task.id == task_id)
-        .values(stage=stage.value, updated_at=datetime.now(timezone.utc))
     )

@@ -1,11 +1,10 @@
-"""Tests the top-5 distinct-doc collapse + score-max ordering logic in /search.
+"""Tests the top-K distinct-doc collapse + score-max ordering logic in /query.
 
-We swap in stub Embedder / SearchGateway / Chatter / session-dependency and drive
-the endpoint via FastAPI's TestClient. No real Azure or Postgres required.
+Drives the endpoint via FastAPI's TestClient with stubs for Embedder, SearchGateway,
+Chatter and session-level repository calls. No real Azure or DB required.
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
 from typing import Any
 
@@ -14,6 +13,8 @@ from fastapi.testclient import TestClient
 
 from app import deps
 from app.main import app
+from app.repositories import datasets as datasets_repo
+from app.repositories import documents as documents_repo
 
 
 DOC_IDS = [str(uuid.uuid4()) for _ in range(4)]
@@ -28,9 +29,10 @@ class StubEmbedder:
 
 
 class StubChatter:
-    async def answer(self, query: str, contexts: list[dict]) -> str:
+    async def answer(self, query: str, contexts: list[dict]) -> tuple[str, dict]:
         names = ",".join(sorted({c["doc_name"] for c in contexts}))
-        return f"answer over:{names}"
+        usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        return f"answer over:{names}", usage
 
     async def aclose(self) -> None:
         pass
@@ -58,18 +60,13 @@ class StubSession:
 class StubCtx:
     class _Settings:
         search_top_k_chunks = 30
+        search_top_k_docs = 5
         chat_max_context_chunks = 12
 
     settings = _Settings()
 
 
 def _rows_for_4_docs() -> list[dict[str, Any]]:
-    # Per-doc max chunk score:
-    #   doc[0] = max(0.9, 0.8) = 0.9
-    #   doc[1] = 1.5
-    #   doc[2] = max(0.5, 0.4, 0.3) = 0.5
-    #   doc[3] = 0.2
-    # Ordering by score_max: B(1.5), A(0.9), C(0.5), D(0.2).
     return [
         {"doc_id": DOC_IDS[0], "doc_name": "docA.pdf", "chunk_index": 0, "content": "a0", "@search.score": 0.9},
         {"doc_id": DOC_IDS[0], "doc_name": "docA.pdf", "chunk_index": 1, "content": "a1", "@search.score": 0.8},
@@ -82,7 +79,7 @@ def _rows_for_4_docs() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def client_with_rows():
+def client_with_rows(monkeypatch):
     rows = _rows_for_4_docs()
 
     stub_search = StubSearchGateway(rows)
@@ -91,6 +88,15 @@ def client_with_rows():
 
     async def _session_dep():
         yield StubSession()
+
+    async def _bulk_get_stub(_session, _ids):
+        return []
+
+    async def _get_dataset_stub(_session, _did):
+        return None
+
+    monkeypatch.setattr(documents_repo, "bulk_get", _bulk_get_stub)
+    monkeypatch.setattr(datasets_repo, "get", _get_dataset_stub)
 
     app.dependency_overrides[deps.get_session] = _session_dep
     app.dependency_overrides[deps.get_search] = lambda: stub_search
@@ -104,27 +110,21 @@ def client_with_rows():
     app.dependency_overrides.clear()
 
 
-def test_top5_collapse_and_order(client_with_rows):
-    resp = client_with_rows.post("/search", json={"query": "hi", "top_k": 5})
+def test_top_k_collapse_and_order(client_with_rows):
+    resp = client_with_rows.post("/query", json={"query": "hi"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["answer"].startswith("answer over:")
-    # Distinct docs, ordered by score_max: B(1.5), A(0.9), C(0.5), D(0.2).
-    source_ids = [s["doc_id"] for s in body["sources"]]
-    assert source_ids == [DOC_IDS[1], DOC_IDS[0], DOC_IDS[2], DOC_IDS[3]]
+    # Distinct docs, ordered by score_max: B(1.5), A(0.9), C(0.5), D(0.2)
+    file_ids = [f["id"] for f in body["files"]]
+    assert file_ids == [DOC_IDS[1], DOC_IDS[0], DOC_IDS[2], DOC_IDS[3]]
 
-    scores = [s["score"] for s in body["sources"]]
-    assert scores[0] == pytest.approx(1.5)
-    assert scores[1] == pytest.approx(0.9)
-    assert scores[2] == pytest.approx(0.5)
-    assert scores[3] == pytest.approx(0.2)
-
-
-def test_top_k_truncates(client_with_rows):
-    resp = client_with_rows.post("/search", json={"query": "hi", "top_k": 2})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert [s["doc_id"] for s in body["sources"]] == [DOC_IDS[1], DOC_IDS[0]]
+    # relevance_score is normalized to 0-100 against the top match.
+    scores = [f["relevance_score"] for f in body["files"]]
+    assert scores[0] == pytest.approx(100.0)
+    assert scores[1] == pytest.approx(60.0)   # 0.9/1.5 * 100
+    assert scores[2] == pytest.approx(33.33, abs=0.01)
+    assert scores[3] == pytest.approx(13.33, abs=0.01)
 
 
 def test_empty_results_skips_chat(monkeypatch):
@@ -141,6 +141,15 @@ def test_empty_results_skips_chat(monkeypatch):
     async def _session_dep():
         yield StubSession()
 
+    async def _bulk_get_stub(_session, _ids):
+        return []
+
+    async def _get_dataset_stub(_session, _did):
+        return None
+
+    monkeypatch.setattr(documents_repo, "bulk_get", _bulk_get_stub)
+    monkeypatch.setattr(datasets_repo, "get", _get_dataset_stub)
+
     app.dependency_overrides[deps.get_session] = _session_dep
     app.dependency_overrides[deps.get_search] = lambda: stub_search
     app.dependency_overrides[deps.get_embedder] = lambda: stub_embedder
@@ -149,10 +158,10 @@ def test_empty_results_skips_chat(monkeypatch):
 
     try:
         with TestClient(app) as client:
-            resp = client.post("/search", json={"query": "hi"})
+            resp = client.post("/query", json={"query": "hi"})
         assert resp.status_code == 200
         body = resp.json()
-        assert body["sources"] == []
+        assert body["files"] == []
         assert body["answer"] == "No matching documents."
     finally:
         app.dependency_overrides.clear()

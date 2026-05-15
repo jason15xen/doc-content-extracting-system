@@ -66,3 +66,6 @@ db/*.db-*
 .ruff_cache/
 .pyre/
 .pytype/
+
+
+sample-api/**

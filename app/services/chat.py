@@ -32,7 +32,9 @@ class Chatter:
         stop=stop_after_attempt(5),
         reraise=True,
     )
-    async def answer(self, query: str, contexts: list[dict]) -> str:
+    async def answer(self, query: str, contexts: list[dict]) -> tuple[str, dict]:
+        """Returns (answer_text, token_usage_dict). The usage dict has keys
+        prompt_tokens, completion_tokens, total_tokens — zero on absent."""
         source_block = "\n\n".join(
             f"[{c['doc_name']}#{c['chunk_index']}]\n{c['content']}"
             for c in contexts
@@ -49,7 +51,14 @@ class Chatter:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ""
+        text = resp.choices[0].message.content or ""
+        usage = getattr(resp, "usage", None)
+        token_usage = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+        }
+        return text, token_usage
 
     async def aclose(self) -> None:
         await self._client.close()

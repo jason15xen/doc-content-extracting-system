@@ -1,67 +1,68 @@
-import uuid
-from datetime import datetime, timezone
+"""Task status / list / cancel shapes — matches sample-api
+`GET /doc/status/{task_id}`, `GET /doc/tasks`, `POST /doc/tasks/{id}/cancel`,
+`DELETE /doc/tasks`."""
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, Field
 
-from app.schemas.common import PageMeta
+from app.schemas.query import TokenUsageInfo
+from app.schemas.upload import FailedFileInfo, SkippedFileInfo
 
 
-class TaskOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    document_id: uuid.UUID | None
-    task_type: str
+class FileProgressInfo(BaseModel):
+    filename: str
+    docId: str | None = None
     status: str
-    stage: str | None
-    total_items: int
-    processed_items: int
-    error_message: str | None
-    created_at: datetime
-    updated_at: datetime
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def processed_time(self) -> float:
-        """Processing duration in seconds. While the task is queued or running,
-        measures time since creation; once finished, the final duration."""
-        if self.status in {"success", "failed"}:
-            end = self.updated_at
-        else:
-            end = datetime.now(timezone.utc)
-        delta = end - self.created_at
-        return round(delta.total_seconds(), 2)
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def progress(self) -> int:
-        if self.status == "success":
-            return 100
-        total = max(self.total_items, 1)
-        done = max(0, min(self.processed_items, total))
-        return int(done / total * 100)
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def result(self) -> str:
-        if self.status == "success":
-            return f"completed ({self.processed_items}/{self.total_items})"
-        if self.status == "failed":
-            stage_label = self.stage or "unknown"
-            reason = self.error_message or "unknown error"
-            return (
-                f"failed at stage '{stage_label}' "
-                f"({self.processed_items}/{self.total_items}): {reason}"
-            )
-        if self.status == "running":
-            stage_label = self.stage or "starting"
-            return (
-                f"processing {stage_label} "
-                f"({self.processed_items}/{self.total_items})"
-            )
-        return "queued"
+    current_step: str
+    actionType: str
+    error: str | None = None
+    error_details: dict[str, Any] | None = None
+    token_usage: TokenUsageInfo | None = None
 
 
-class TaskListOut(BaseModel):
-    items: list[TaskOut]
-    meta: PageMeta
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    action: str = Field(default="upload")
+    status: str
+    total_files: int
+    processed_files: int
+    failed_file_count: int
+    skipped_file_count: int
+    failed_files: list[FailedFileInfo] = Field(default_factory=list)
+    skipped_files: list[SkippedFileInfo] = Field(default_factory=list)
+    current_file: str = ""
+    current_step: str = ""
+    description: str | None = None
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    elapsed_seconds: float
+    processing_seconds: float | None = None
+    error: str | None = None
+    files: list[FileProgressInfo] = Field(default_factory=list)
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    action: str = Field(default="upload")
+    status: str
+    total_files: int
+    processed_files: int
+    failed_file_count: int
+    created_at: str
+
+
+class TaskListResponse(BaseModel):
+    total_tasks: int
+    tasks: list[TaskListItem] = Field(default_factory=list)
+
+
+class TaskCancelResponse(BaseModel):
+    message: str
+    cleaned_files: list[str] = Field(default_factory=list)
+    cleaned_count: int
+
+
+class TaskClearResponse(BaseModel):
+    message: str
+    cleared_count: int

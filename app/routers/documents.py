@@ -1,5 +1,7 @@
+import json
 import os
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import (
@@ -12,9 +14,15 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import PipelineStage, TaskType
+from app.db.models import (
+    DocumentStatus,
+    TaskAction,
+    TaskFileAction,
+    TaskFileStatus,
+)
 from app.deps import get_pipeline_context, get_session
 from app.extraction.config import SUPPORTED_EXTENSIONS
 from app.pipeline.context import PipelineContext
@@ -22,186 +30,486 @@ from app.pipeline.delete import run_delete_task
 from app.pipeline.ingest import run_ingest_task
 from app.repositories import datasets as datasets_repo
 from app.repositories import documents as documents_repo
+from app.repositories import task_files as task_files_repo
 from app.repositories import tasks as tasks_repo
-from app.schemas.common import PageMeta
 from app.schemas.documents import (
-    DeleteAccepted,
-    DeleteRequest,
-    DocumentListOut,
-    DocumentOut,
+    AsyncDeleteResponse,
+    BulkDeleteRequest,
+    DocumentDeleteInfo,
+    DocumentInfo,
+    DocumentListResponse,
 )
-from app.schemas.upload import UploadAcceptedItem, UploadResponse
+from app.schemas.upload import (
+    AsyncUploadResponse,
+    FailedFileInfo,
+    SkippedFileInfo,
+)
 from app.services.hashing import OversizeError, save_upload_with_hash
 from app.services.storage import temp_upload_path, try_unlink
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(prefix="/doc", tags=["documents"])
+
+
+def _doc_to_info(doc, dataset_name: str | None) -> DocumentInfo:
+    return DocumentInfo(
+        id=doc.id,
+        name=doc.name,
+        hash=doc.hash,
+        uploaded_date=doc.uploaded_at.isoformat() if doc.uploaded_at else "",
+        description=doc.description,
+        file_path=doc.storage_path,
+        file_size=doc.file_size,
+        status=doc.status,
+        dataset_id=str(doc.dataset_id) if doc.dataset_id else None,
+        dataset_name=dataset_name,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+        updated_at=doc.updated_at.isoformat() if doc.updated_at else "",
+    )
+
+
+def _parse_items(items_raw: str) -> list[dict]:
+    """Sample-api accepts the items payload as either a bare array or an
+    object with an `items` key. Mirror that."""
+    try:
+        parsed = json.loads(items_raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
+
+    if isinstance(parsed, dict):
+        items_list = parsed.get("items", parsed)
+    else:
+        items_list = parsed
+
+    if not isinstance(items_list, list):
+        raise HTTPException(
+            status_code=400, detail="items must be a JSON array or {items:[...]}"
+        )
+    return items_list
 
 
 @router.post(
-    "/upload",
-    response_model=UploadResponse,
+    "",
+    response_model=AsyncUploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_documents(
     background: BackgroundTasks,
     files: Annotated[list[UploadFile], File(...)],
-    dataset_id: Annotated[uuid.UUID | None, Form()] = None,
+    items: Annotated[str, Form(...)],
+    description: Annotated[str | None, Form()] = None,
+    dataset: Annotated[str | None, Form()] = None,
     session: AsyncSession = Depends(get_session),
     ctx: PipelineContext = Depends(get_pipeline_context),
-) -> UploadResponse:
+) -> AsyncUploadResponse:
     if not files:
         raise HTTPException(status_code=422, detail="no files provided")
 
-    if dataset_id is not None:
-        ds = await datasets_repo.get(session, dataset_id)
-        if ds is None:
-            raise HTTPException(status_code=404, detail="dataset not found")
+    items_list = _parse_items(items)
 
-    items: list[UploadAcceptedItem] = []
-    accepted_doc_ids: list[uuid.UUID] = []
+    dataset_uuid: uuid.UUID | None = None
+    dataset_name: str | None = None
+    if dataset:
+        try:
+            dataset_uuid = uuid.UUID(dataset)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset ID '{dataset}' not found. Please use a valid dataset ID from GET /datasets.",
+            )
+        ds_row = await datasets_repo.get(session, dataset_uuid)
+        if ds_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset ID '{dataset}' not found. Please use a valid dataset ID from GET /datasets.",
+            )
+        dataset_name = ds_row.name
+
+    items_map: dict[str, dict] = {}
+    seen_ids: set[str] = set()
+    for item in items_list:
+        if not all(k in item for k in ("clientFileId", "id", "fileName")):
+            raise HTTPException(
+                status_code=400, detail=f"Missing fields in item: {item}"
+            )
+        client_ext = Path(item["clientFileId"]).suffix.lower()
+        target_ext = Path(item["fileName"]).suffix.lower()
+        if client_ext != target_ext:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extension mismatch: {item['clientFileId']} vs {item['fileName']}",
+            )
+        item_id = str(item["id"])
+        if item_id in seen_ids:
+            raise HTTPException(
+                status_code=400, detail=f"Duplicate id: {item_id}"
+            )
+        seen_ids.add(item_id)
+        if item["clientFileId"] in items_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate clientFileId: {item['clientFileId']}",
+            )
+        items_map[item["clientFileId"]] = item
+
+    uploaded_names = {f.filename for f in files}
+    if uploaded_names != set(items_map.keys()):
+        raise HTTPException(status_code=400, detail="Files and items mismatch")
+
     max_bytes = ctx.settings.max_upload_mb * 1024 * 1024
 
+    # Buckets accumulated per file then flushed into TaskFile rows + the
+    # response payload.
+    accepted_docs: list[dict] = []   # docs to actually process (pending)
+    skipped_infos: list[SkippedFileInfo] = []
+    failed_infos: list[FailedFileInfo] = []
+    updated_files: list[str] = []
+
     for upload in files:
-        filename = upload.filename or ""
-        ext = os.path.splitext(filename)[1].lower()
+        client_id = upload.filename or ""
+        meta = items_map[client_id]
+        doc_id = str(meta["id"])
+        target_name = meta["fileName"]
+        ext = Path(target_name).suffix.lower()
 
         if ext not in SUPPORTED_EXTENSIONS:
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename,
-                    status="failed",
-                    reason=f"unsupported_extension:{ext or '(none)'}",
+            failed_infos.append(
+                FailedFileInfo(
+                    filename=target_name,
+                    docId=doc_id,
+                    reason=f"unsupported file type ({ext})",
                 )
             )
             continue
 
-        # Stream to a unique file under the OS temp dir. The ingest pipeline
-        # always unlinks this path (success or failure) so uploaded source
-        # bytes never persist under storage/uploads.
         scratch_path = temp_upload_path(ext)
         try:
-            hash_hex, _size = await save_upload_with_hash(upload, scratch_path, max_bytes)
+            hash_hex, size = await save_upload_with_hash(
+                upload, scratch_path, max_bytes
+            )
         except OversizeError as exc:
             try_unlink(scratch_path)
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename, status="failed", reason=f"oversize:{exc}"
+            failed_infos.append(
+                FailedFileInfo(
+                    filename=target_name,
+                    docId=doc_id,
+                    reason=f"exceeds {ctx.settings.max_upload_mb} MB limit ({exc})",
                 )
             )
             continue
         except Exception as exc:
             try_unlink(scratch_path)
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename, status="failed", reason=f"save_error:{exc}"
+            failed_infos.append(
+                FailedFileInfo(
+                    filename=target_name,
+                    docId=doc_id,
+                    reason=f"save_error: {exc}",
                 )
             )
             continue
 
-        existing = await documents_repo.get_by_hash(session, hash_hex)
+        existing = await documents_repo.get(session, doc_id)
+        action_type = TaskFileAction.CREATE
+        is_update = False
+
         if existing is not None:
-            try_unlink(scratch_path)
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename, status="failed", reason="duplicate"
+            if (
+                existing.hash == hash_hex
+                and existing.name == target_name
+                and existing.status == DocumentStatus.SUCCESS.value
+            ):
+                try_unlink(scratch_path)
+                skipped_infos.append(
+                    SkippedFileInfo(
+                        filename=target_name,
+                        docId=doc_id,
+                        reason="unchanged (same ID, filename, and content)",
+                    )
                 )
-            )
-            continue
+                continue
 
-        doc = await documents_repo.create(
-            session,
-            name=filename,
-            hash_=hash_hex,
-            dataset_id=dataset_id,
-            storage_path=str(scratch_path),
-        )
+            is_update = True
+            action_type = TaskFileAction.UPDATE
+            await documents_repo.replace(
+                session,
+                existing,
+                name=target_name,
+                hash_=hash_hex,
+                description=description,
+                dataset_id=dataset_uuid,
+                storage_path=str(scratch_path),
+                file_size=size,
+            )
+            if existing.hash == hash_hex:
+                updated_files.append(f"{target_name} (filename updated, ID: {doc_id})")
+            else:
+                updated_files.append(f"{target_name} (content updated, ID: {doc_id})")
+        else:
+            try:
+                await documents_repo.create(
+                    session,
+                    doc_id=doc_id,
+                    name=target_name,
+                    hash_=hash_hex,
+                    description=description,
+                    dataset_id=dataset_uuid,
+                    storage_path=str(scratch_path),
+                    file_size=size,
+                )
+            except IntegrityError:
+                await session.rollback()
+                try_unlink(scratch_path)
+                failed_infos.append(
+                    FailedFileInfo(
+                        filename=target_name,
+                        docId=doc_id,
+                        reason="database insert failed (possible duplicate content under a different document ID)",
+                    )
+                )
+                continue
 
         try:
             await session.commit()
         except Exception as exc:
             await session.rollback()
             try_unlink(scratch_path)
-            items.append(
-                UploadAcceptedItem(
-                    filename=filename, status="failed", reason=f"commit_error:{exc}"
+            failed_infos.append(
+                FailedFileInfo(
+                    filename=target_name,
+                    docId=doc_id,
+                    reason=f"commit_error: {exc}",
                 )
             )
             continue
 
-        accepted_doc_ids.append(doc.id)
-        items.append(
-            UploadAcceptedItem(
-                filename=filename,
-                status="accepted",
-                document_id=doc.id,
-            )
+        accepted_docs.append(
+            {
+                "filename": target_name,
+                "doc_id": doc_id,
+                "action_type": action_type.value,
+                "is_update": is_update,
+            }
         )
 
-    task_id: uuid.UUID | None = None
-    if accepted_doc_ids:
-        task = await tasks_repo.create(
-            session,
-            task_type=TaskType.INGEST,
-            stage=PipelineStage.UPLOADED,
-            total_items=len(accepted_doc_ids),
-        )
-        await session.commit()
-        task_id = task.id
-        background.add_task(run_ingest_task, task.id, accepted_doc_ids)
-
-    return UploadResponse(task_id=task_id, items=items)
-
-
-@router.get("", response_model=DocumentListOut)
-async def list_documents(
-    limit: int = 50,
-    offset: int = 0,
-    dataset_id: uuid.UUID | None = None,
-    status_filter: str | None = None,
-    session: AsyncSession = Depends(get_session),
-) -> DocumentListOut:
-    limit = max(1, min(limit, 200))
-    offset = max(0, offset)
-    rows, total = await documents_repo.list_paginated(
-        session,
-        limit=limit,
-        offset=offset,
-        dataset_id=dataset_id,
-        status=status_filter,
-    )
-    return DocumentListOut(
-        items=[DocumentOut.model_validate(r) for r in rows],
-        meta=PageMeta(total=total, limit=limit, offset=offset),
-    )
-
-
-@router.delete("", response_model=DeleteAccepted, status_code=status.HTTP_202_ACCEPTED)
-async def delete_documents(
-    body: DeleteRequest,
-    background: BackgroundTasks,
-    session: AsyncSession = Depends(get_session),
-) -> DeleteAccepted:
-    if not body.doc_ids:
-        raise HTTPException(status_code=422, detail="doc_ids required")
+    # ----- create the task + task_files rows -----
+    total_files = len(accepted_docs) + len(skipped_infos) + len(failed_infos)
     task = await tasks_repo.create(
-        session, task_type=TaskType.DELETE, total_items=len(body.doc_ids)
+        session,
+        action=TaskAction.UPLOAD,
+        description=description,
+        total_files=total_files,
+        failed_file_count=len(failed_infos),
+        skipped_file_count=len(skipped_infos),
     )
     await session.commit()
-    background.add_task(run_delete_task, task.id, list(body.doc_ids))
-    return DeleteAccepted(task_id=task.id)
+    task_id = task.id
+
+    rows: list[dict] = []
+    for d in accepted_docs:
+        rows.append(
+            {
+                "filename": d["filename"],
+                "doc_id": d["doc_id"],
+                "status": TaskFileStatus.PENDING.value,
+                "action_type": d["action_type"],
+            }
+        )
+    for s in skipped_infos:
+        rows.append(
+            {
+                "filename": s.filename,
+                "doc_id": s.docId,
+                "status": TaskFileStatus.SKIPPED.value,
+                "action_type": TaskFileAction.CREATE.value,
+                "reason": s.reason,
+            }
+        )
+    for f in failed_infos:
+        rows.append(
+            {
+                "filename": f.filename,
+                "doc_id": f.docId,
+                "status": TaskFileStatus.FAILED.value,
+                "action_type": TaskFileAction.CREATE.value,
+                "reason": f.reason,
+            }
+        )
+    await task_files_repo.create_many(session, task_id, rows)
+    await session.commit()
+
+    # If nothing made it through validation, finalize immediately as
+    # completed/failed and skip the background worker.
+    if not accepted_docs:
+        async with ctx.sessionmaker() as fs:
+            await tasks_repo.mark_completed(fs, task_id, failed=False)
+            await fs.commit()
+    else:
+        background.add_task(
+            run_ingest_task, task_id, [d["doc_id"] for d in accepted_docs]
+        )
+
+    message_parts: list[str] = []
+    if accepted_docs:
+        message_parts.append(f"{len(accepted_docs)} files queued")
+    if skipped_infos:
+        message_parts.append(f"{len(skipped_infos)} skipped")
+    if failed_infos:
+        message_parts.append(f"{len(failed_infos)} failed")
+
+    return AsyncUploadResponse(
+        task_id=str(task_id),
+        message=", ".join(message_parts) if message_parts else "No files to process",
+        status_url=f"/doc/status/{task_id}",
+        total_files=total_files,
+        skipped_files=skipped_infos,
+        failed_files=failed_infos,
+        updated_files=updated_files,
+        dataset=dataset_name,
+    )
 
 
-@router.delete("/all", status_code=status.HTTP_202_ACCEPTED)
+@router.get("", response_model=DocumentListResponse)
+async def list_documents(
+    limit: int = 100,
+    dataset: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> DocumentListResponse:
+    limit = max(1, min(limit, 1000))
+
+    dataset_uuid: uuid.UUID | None = None
+    if dataset:
+        try:
+            dataset_uuid = uuid.UUID(dataset)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset ID '{dataset}' not found. Please use a valid dataset ID from GET /datasets.",
+            )
+        ds_row = await datasets_repo.get(session, dataset_uuid)
+        if ds_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset ID '{dataset}' not found. Please use a valid dataset ID from GET /datasets.",
+            )
+
+    rows, _total = await documents_repo.list_with_dataset_names(
+        session, limit=limit, offset=0, dataset_id=dataset_uuid
+    )
+    return DocumentListResponse(
+        total_count=len(rows),
+        documents=[_doc_to_info(doc, ds_name) for doc, ds_name in rows],
+        dataset=str(dataset_uuid) if dataset_uuid else None,
+    )
+
+
+@router.delete(
+    "", response_model=AsyncDeleteResponse, status_code=status.HTTP_202_ACCEPTED
+)
+async def delete_documents(
+    body: BulkDeleteRequest,
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+    ctx: PipelineContext = Depends(get_pipeline_context),
+) -> AsyncDeleteResponse:
+    if not body.doc_ids:
+        raise HTTPException(status_code=400, detail="No document IDs provided")
+
+    docs = await documents_repo.bulk_get(session, body.doc_ids)
+    found = {d.id: d for d in docs}
+    documents_info: list[DocumentDeleteInfo] = []
+    not_found_ids: list[str] = []
+    task_file_rows: list[dict] = []
+    for doc_id in body.doc_ids:
+        if doc_id in found:
+            doc = found[doc_id]
+            documents_info.append(DocumentDeleteInfo(docId=doc_id, name=doc.name))
+            task_file_rows.append(
+                {
+                    "filename": doc.name,
+                    "doc_id": doc_id,
+                    "status": TaskFileStatus.PENDING.value,
+                    "action_type": TaskFileAction.DELETE.value,
+                }
+            )
+        else:
+            not_found_ids.append(doc_id)
+            task_file_rows.append(
+                {
+                    "filename": f"Unknown (ID: {doc_id})",
+                    "doc_id": doc_id,
+                    "status": TaskFileStatus.FAILED.value,
+                    "action_type": TaskFileAction.DELETE.value,
+                    "reason": "document not found",
+                }
+            )
+
+    found_ids = [d.id for d in docs]
+    task = await tasks_repo.create(
+        session,
+        action=TaskAction.DELETE,
+        description=f"Deleting {len(body.doc_ids)} documents",
+        total_files=len(body.doc_ids),
+        failed_file_count=len(not_found_ids),
+    )
+    await session.commit()
+    task_id = task.id
+    await task_files_repo.create_many(session, task_id, task_file_rows)
+    await session.commit()
+
+    if found_ids:
+        background.add_task(run_delete_task, task_id, found_ids)
+    else:
+        async with ctx.sessionmaker() as fs:
+            await tasks_repo.mark_completed(fs, task_id)
+            await fs.commit()
+
+    return AsyncDeleteResponse(
+        task_id=str(task_id),
+        message=f"Deletion started for {len(body.doc_ids)} documents",
+        status_url=f"/doc/status/{task_id}",
+        total_documents=len(body.doc_ids),
+        documents=documents_info,
+        not_found=not_found_ids,
+    )
+
+
+@router.delete("/all", response_model=AsyncDeleteResponse, status_code=status.HTTP_202_ACCEPTED)
 async def delete_all_documents(
     background: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
-) -> DeleteAccepted:
-    doc_ids = await documents_repo.list_all_ids(session)
-    if not doc_ids:
-        raise HTTPException(status_code=404, detail="no documents to delete")
+) -> AsyncDeleteResponse:
+    docs = list(await documents_repo.bulk_get(session, await documents_repo.list_all_ids(session)))
+    if not docs:
+        raise HTTPException(status_code=404, detail="No documents found")
+
+    doc_ids = [d.id for d in docs]
+    documents_info = [DocumentDeleteInfo(docId=d.id, name=d.name) for d in docs]
+    task_file_rows = [
+        {
+            "filename": d.name,
+            "doc_id": d.id,
+            "status": TaskFileStatus.PENDING.value,
+            "action_type": TaskFileAction.DELETE.value,
+        }
+        for d in docs
+    ]
+
     task = await tasks_repo.create(
-        session, task_type=TaskType.DELETE, total_items=len(doc_ids)
+        session,
+        action=TaskAction.DELETE,
+        description="DELETE ALL",
+        total_files=len(doc_ids),
     )
     await session.commit()
-    background.add_task(run_delete_task, task.id, doc_ids)
-    return DeleteAccepted(task_id=task.id)
+    task_id = task.id
+    await task_files_repo.create_many(session, task_id, task_file_rows)
+    await session.commit()
+
+    background.add_task(run_delete_task, task_id, doc_ids)
+    return AsyncDeleteResponse(
+        task_id=str(task_id),
+        message=f"DELETE ALL: {len(doc_ids)} documents",
+        status_url=f"/doc/status/{task_id}",
+        total_documents=len(doc_ids),
+        documents=documents_info,
+        not_found=[],
+    )

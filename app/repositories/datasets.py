@@ -2,10 +2,10 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Dataset
+from app.db.models import Dataset, Document
 
 
 async def create(
@@ -29,6 +29,26 @@ async def get_by_name(session: AsyncSession, name: str) -> Dataset | None:
 async def list_all(session: AsyncSession) -> Sequence[Dataset]:
     stmt = select(Dataset).order_by(Dataset.created_at.desc())
     return (await session.execute(stmt)).scalars().all()
+
+
+async def list_with_counts(
+    session: AsyncSession,
+) -> list[tuple[Dataset, int]]:
+    """Returns each dataset together with its document_count, matching the
+    sample-api list/detail response shape."""
+    stmt = (
+        select(Dataset, func.count(Document.id))
+        .join(Document, Document.dataset_id == Dataset.id, isouter=True)
+        .group_by(Dataset.id)
+        .order_by(Dataset.created_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(ds, int(cnt or 0)) for ds, cnt in rows]
+
+
+async def document_count(session: AsyncSession, dataset_id: uuid.UUID) -> int:
+    stmt = select(func.count(Document.id)).where(Document.dataset_id == dataset_id)
+    return int((await session.execute(stmt)).scalar_one() or 0)
 
 
 async def update(

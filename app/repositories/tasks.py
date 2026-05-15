@@ -5,126 +5,161 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentStatus, PipelineStage, Task, TaskStatus, TaskType
+from app.db.models import Document, DocumentStatus, Task, TaskAction, TaskStatus
 
 
 async def create(
     session: AsyncSession,
     *,
-    task_type: TaskType,
-    document_id: uuid.UUID | None = None,
-    status: TaskStatus = TaskStatus.QUEUED,
-    stage: PipelineStage | None = None,
-    total_items: int = 1,
+    action: TaskAction,
+    description: str | None = None,
+    total_files: int = 0,
+    failed_file_count: int = 0,
+    skipped_file_count: int = 0,
 ) -> Task:
     task = Task(
-        task_type=task_type.value,
-        document_id=document_id,
-        status=status.value,
-        stage=stage.value if stage else None,
-        total_items=total_items,
-        processed_items=0,
+        action=action.value,
+        status=TaskStatus.PENDING.value,
+        description=description,
+        total_files=total_files,
+        processed_files=0,
+        failed_file_count=failed_file_count,
+        skipped_file_count=skipped_file_count,
     )
     session.add(task)
     await session.flush()
     return task
 
 
-async def set_total_items(
-    session: AsyncSession, task_id: uuid.UUID, total_items: int
-) -> None:
-    """Atomic UPDATE for total_items — mirrors `bump_processed` and avoids
-    the load-modify-save pattern that races with concurrent column writes."""
+async def get(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
+    return await session.get(Task, task_id)
+
+
+async def mark_started(session: AsyncSession, task_id: uuid.UUID) -> None:
+    now = datetime.now(timezone.utc)
     await session.execute(
         update(Task)
         .where(Task.id == task_id)
         .values(
-            total_items=total_items,
-            updated_at=datetime.now(timezone.utc),
-        )
-    )
-
-
-async def bump_processed(session: AsyncSession, task: Task, by: int = 1) -> None:
-    # Atomic SQL increment — safe when many per-doc coroutines bump the same
-    # task row concurrently. A load-modify-save pattern would silently lose
-    # increments under concurrency (the in-memory value goes stale between
-    # read and write), causing processed_items to under-count and the UI to
-    # report phantom "stuck" docs.
-    now = datetime.now(timezone.utc)
-    await session.execute(
-        update(Task)
-        .where(Task.id == task.id)
-        .values(
-            processed_items=Task.processed_items + by,
+            status=TaskStatus.PROCESSING.value,
+            started_at=now,
             updated_at=now,
         )
     )
 
 
-async def get(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
-    return await session.get(Task, task_id)
+async def mark_completed(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+) -> None:
+    """Final status transition. If `failed` flips on, status becomes
+    'failed', else 'completed'. Sets completed_at."""
+    now = datetime.now(timezone.utc)
+    status = TaskStatus.FAILED.value if failed else TaskStatus.COMPLETED.value
+    values: dict = {
+        "status": status,
+        "completed_at": now,
+        "updated_at": now,
+        "current_file": "",
+        "current_step": "completed",
+    }
+    if error_message is not None:
+        values["error_message"] = error_message[:2000]
+    await session.execute(update(Task).where(Task.id == task_id).values(**values))
+
+
+async def mark_cancelled(session: AsyncSession, task_id: uuid.UUID) -> None:
+    now = datetime.now(timezone.utc)
+    await session.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            status=TaskStatus.CANCELLED.value,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+
+
+async def bump_processed(session: AsyncSession, task_id: uuid.UUID, by: int = 1) -> None:
+    now = datetime.now(timezone.utc)
+    await session.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            processed_files=Task.processed_files + by,
+            updated_at=now,
+        )
+    )
+
+
+async def bump_failed(session: AsyncSession, task_id: uuid.UUID, by: int = 1) -> None:
+    now = datetime.now(timezone.utc)
+    await session.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(
+            failed_file_count=Task.failed_file_count + by,
+            updated_at=now,
+        )
+    )
+
+
+async def set_current(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    current_file: str | None = None,
+    current_step: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    values: dict = {"updated_at": now}
+    if current_file is not None:
+        values["current_file"] = current_file
+    if current_step is not None:
+        values["current_step"] = current_step
+    await session.execute(update(Task).where(Task.id == task_id).values(**values))
 
 
 async def list_paginated(
     session: AsyncSession,
     *,
     limit: int,
-    offset: int,
     status: str | None = None,
-    document_id: uuid.UUID | None = None,
-    task_type: str | None = None,
+    action: str | None = None,
 ) -> tuple[Sequence[Task], int]:
     base = select(Task)
     count_stmt = select(func.count()).select_from(Task)
     if status is not None:
         base = base.where(Task.status == status)
         count_stmt = count_stmt.where(Task.status == status)
-    if document_id is not None:
-        base = base.where(Task.document_id == document_id)
-        count_stmt = count_stmt.where(Task.document_id == document_id)
-    if task_type is not None:
-        base = base.where(Task.task_type == task_type)
-        count_stmt = count_stmt.where(Task.task_type == task_type)
-    base = base.order_by(Task.created_at.desc()).limit(limit).offset(offset)
+    if action is not None:
+        base = base.where(Task.action == action)
+        count_stmt = count_stmt.where(Task.action == action)
+    base = base.order_by(Task.created_at.desc()).limit(limit)
     rows = (await session.execute(base)).scalars().all()
     total = (await session.execute(count_stmt)).scalar_one()
     return rows, total
 
 
-async def update_stage_status(
-    session: AsyncSession,
-    task: Task,
-    *,
-    stage: PipelineStage | None = None,
-    status: TaskStatus | None = None,
-    error_message: str | None = None,
-) -> None:
-    if stage is not None:
-        task.stage = stage.value
-    if status is not None:
-        task.status = status.value
-    if error_message is not None:
-        task.error_message = error_message[:2000]
-    task.updated_at = datetime.now(timezone.utc)
-
-
 async def reconcile_running_tasks(session: AsyncSession) -> int:
-    """On process boot, mark any tasks stuck in `running` as `failed` and flip
-    any documents left in `processing` back to `failed` so they aren't
-    permanently stuck."""
+    """On boot, mark `processing` tasks as `failed` (interrupted by restart)
+    and flip in-flight documents back to `failed`."""
     now = datetime.now(timezone.utc)
     stmt = (
         update(Task)
-        .where(Task.status == TaskStatus.RUNNING.value)
+        .where(Task.status == TaskStatus.PROCESSING.value)
         .values(
             status=TaskStatus.FAILED.value,
             error_message="interrupted by restart",
+            completed_at=now,
             updated_at=now,
         )
     )
     result = await session.execute(stmt)
-
     await session.execute(
         update(Document)
         .where(Document.status == DocumentStatus.PROCESSING.value)
@@ -133,13 +168,22 @@ async def reconcile_running_tasks(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
-async def delete_one(session: AsyncSession, task_id: uuid.UUID) -> int:
-    stmt = delete(Task).where(Task.id == task_id)
+async def clear_history(session: AsyncSession) -> int:
+    """Sample-api `DELETE /doc/tasks` — clear only finished tasks."""
+    stmt = delete(Task).where(
+        Task.status.in_(
+            (
+                TaskStatus.COMPLETED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            )
+        )
+    )
     result = await session.execute(stmt)
     return result.rowcount or 0
 
 
-async def delete_all(session: AsyncSession) -> int:
-    stmt = delete(Task)
+async def delete_one(session: AsyncSession, task_id: uuid.UUID) -> int:
+    stmt = delete(Task).where(Task.id == task_id)
     result = await session.execute(stmt)
     return result.rowcount or 0
