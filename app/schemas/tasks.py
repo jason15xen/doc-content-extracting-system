@@ -15,6 +15,7 @@ class FileProgressInfo(BaseModel):
     status: str
     current_step: str
     actionType: str
+    reason: str | None = None
     error: str | None = None
     error_details: dict[str, Any] | None = None
     token_usage: TokenUsageInfo | None = None

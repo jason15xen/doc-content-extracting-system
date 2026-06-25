@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -32,8 +33,20 @@ SEMANTIC_CONFIG_NAME = "default"
 HNSW_CONFIG_NAME = "hnsw-cosine"
 HNSW_PROFILE_NAME = "default-hnsw"
 
+_LOG = logging.getLogger("app.search")
 
-def build_index(name: str, enable_semantic: bool) -> SearchIndex:
+
+def _odata_quote(value: str) -> str:
+    """Escape a string for an OData filter literal. Client-supplied ids (doc_id,
+    dataset_id) are interpolated into `field eq '<value>'`; a single quote in
+    the value would otherwise break the filter (or allow injection). OData
+    escapes a quote by doubling it."""
+    return value.replace("'", "''")
+
+
+def build_index(
+    name: str, enable_semantic: bool, dimensions: int = 1536
+) -> SearchIndex:
     fields: list[Any] = [
         SimpleField(
             name="id", type=SearchFieldDataType.String, key=True, filterable=True
@@ -70,7 +83,7 @@ def build_index(name: str, enable_semantic: bool) -> SearchIndex:
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
             hidden=True,
-            vector_search_dimensions=1536,
+            vector_search_dimensions=dimensions,
             vector_search_profile_name=HNSW_PROFILE_NAME,
         ),
         SimpleField(
@@ -167,7 +180,11 @@ class SearchGateway:
         return self._index_client
 
     async def ensure_index(self) -> None:
-        index = build_index(self._index_name, enable_semantic=self._enable_semantic)
+        index = build_index(
+            self._index_name,
+            enable_semantic=self._enable_semantic,
+            dimensions=self._settings.embedding_dimensions,
+        )
         await self._index().create_or_update_index(index)
 
     async def upsert_chunks(self, docs: list[dict[str, Any]]) -> None:
@@ -206,7 +223,7 @@ class SearchGateway:
                 keys: list[str] = []
                 result = await client.search(
                     search_text="*",
-                    filter=f"doc_id eq '{did}'",
+                    filter=f"doc_id eq '{_odata_quote(did)}'",
                     select=["id"],
                     top=1000,
                 )
@@ -243,7 +260,7 @@ class SearchGateway:
         )
         filter_expr: str | None = None
         if dataset_id is not None:
-            filter_expr = f"dataset_id eq '{dataset_id}'"
+            filter_expr = f"dataset_id eq '{_odata_quote(str(dataset_id))}'"
         kwargs: dict[str, Any] = {
             "search_text": query,
             "vector_queries": [vector_q],
@@ -260,17 +277,30 @@ class SearchGateway:
             rows.append(dict(row))
         return rows
 
+    # Facet cap for distinct doc_id enumeration. High enough for realistic
+    # corpora; if exceeded we log (an under-count only makes orphan cleanup
+    # clean fewer rows this pass — never a wrong delete).
+    DISTINCT_FACET_LIMIT = 50000
+
     async def list_distinct_doc_ids(self) -> list[str]:
+        """Distinct doc_ids in the index via a facet query — far cheaper than
+        scanning every chunk row (no content pulled). Used only by orphan
+        cleanup, where an under-count is safe."""
         client = self._search()
-        seen: set[str] = set()
         result = await client.search(
-            search_text="*", select=["doc_id"], top=100000
+            search_text="*",
+            facets=[f"doc_id,count:{self.DISTINCT_FACET_LIMIT}"],
+            top=0,
         )
-        async for row in result:
-            did = row.get("doc_id")
-            if did:
-                seen.add(did)
-        return list(seen)
+        facets = (await result.get_facets()) or {}
+        buckets = facets.get("doc_id") or []
+        ids = [b["value"] for b in buckets if b.get("value")]
+        if len(ids) >= self.DISTINCT_FACET_LIMIT:
+            _LOG.warning(
+                "list_distinct_doc_ids hit facet cap %d; result may be truncated",
+                self.DISTINCT_FACET_LIMIT,
+            )
+        return ids
 
     async def aclose(self) -> None:
         if self._search_client is not None:

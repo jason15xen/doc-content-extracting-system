@@ -80,6 +80,7 @@ async def get_task_status(
                     status=tf.status,
                     current_step=tf.current_step,
                     actionType=tf.action_type,
+                    reason=tf.reason,
                     error=tf.error,
                     error_details=tf.error_details,
                 )

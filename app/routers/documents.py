@@ -370,10 +370,12 @@ async def upload_documents(
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
     limit: int = 100,
+    offset: int = 0,
     dataset: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> DocumentListResponse:
     limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
 
     dataset_uuid: uuid.UUID | None = None
     if dataset:
@@ -391,11 +393,11 @@ async def list_documents(
                 detail=f"Dataset ID '{dataset}' not found. Please use a valid dataset ID from GET /datasets.",
             )
 
-    rows, _total = await documents_repo.list_with_dataset_names(
-        session, limit=limit, offset=0, dataset_id=dataset_uuid
+    rows, total = await documents_repo.list_with_dataset_names(
+        session, limit=limit, offset=offset, dataset_id=dataset_uuid
     )
     return DocumentListResponse(
-        total_count=len(rows),
+        total_count=total,
         documents=[_doc_to_info(doc, ds_name) for doc, ds_name in rows],
         dataset=str(dataset_uuid) if dataset_uuid else None,
     )

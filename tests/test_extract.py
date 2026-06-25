@@ -4,12 +4,30 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app import deps
 from app.main import app
+from app.settings import get_settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 client = TestClient(app)
 
 HAS_SOFFICE = shutil.which("soffice") is not None
+
+
+@pytest.fixture(autouse=True)
+def _override_pipeline_ctx():
+    """The /extract route depends on the pipeline context (for OCR settings).
+    The module-level TestClient doesn't run lifespan, so `app.state.pipeline`
+    is never populated — provide a lightweight stub so the route works in tests
+    without booting Azure/OCR."""
+
+    class _Ctx:
+        settings = get_settings()
+        ocr_pool = None
+
+    app.dependency_overrides[deps.get_pipeline_context] = lambda: _Ctx()
+    yield
+    app.dependency_overrides.pop(deps.get_pipeline_context, None)
 
 
 def _post_one(path: Path):
@@ -139,6 +157,149 @@ def test_pdf_multi_column_reading_order():
     assert left_end < right_start, (
         f"columns interleaved: LEFTEND@{left_end} RIGHTSTART@{right_start}"
     )
+
+
+def _build_pdf(path: Path, pages: list[tuple[str, str | None]]) -> None:
+    """Build a PDF where each page is either ('text', <string>) — a real text
+    layer — or ('image', None) — a full-page raster with no text, i.e. what
+    scan detection treats as a scanned page."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    try:
+        for kind, payload in pages:
+            page = doc.new_page()
+            if kind == "text":
+                page.insert_text((72, 72), payload or "")
+            else:
+                rect = page.rect
+                pix = pymupdf.Pixmap(
+                    pymupdf.csRGB,
+                    pymupdf.IRect(0, 0, int(rect.width), int(rect.height)),
+                )
+                pix.clear_with(220)
+                page.insert_image(rect, pixmap=pix)
+        doc.save(str(path))
+    finally:
+        doc.close()
+
+
+def test_scanned_page_skipped_and_noted(tmp_path):
+    """With OCR off (default), a scanned page is dropped, the text page is
+    still extracted, and the skipped page index is surfaced."""
+    from app.extraction.extractors.pdf import PymupdfExtractor
+
+    pdf = tmp_path / "mixed.pdf"
+    _build_pdf(
+        pdf,
+        [
+            ("text", "Hello text page with well over fifty characters of real content here."),
+            ("image", None),
+        ],
+    )
+    ext = PymupdfExtractor(file_type="pdf")  # ocr_pool=None, reject_scanned=False
+    result = ext.extract(str(pdf), "mixed.pdf")
+    assert "Hello text page" in result["plain_text"]
+    assert result["skipped_pages"] == [2]
+
+
+def test_all_scanned_pdf_yields_empty_text(tmp_path):
+    """A fully-scanned PDF with no text layer produces no text (the pipeline
+    turns this into a FAILED doc) while still tracking every skipped page."""
+    from app.extraction.extractors.pdf import PymupdfExtractor
+
+    pdf = tmp_path / "scanned.pdf"
+    _build_pdf(pdf, [("image", None), ("image", None)])
+    ext = PymupdfExtractor(file_type="pdf")
+    result = ext.extract(str(pdf), "scanned.pdf")
+    assert result["plain_text"] == ""
+    assert result["skipped_pages"] == [1, 2]
+    assert result["scanned_pages"] == [1, 2]
+
+
+def test_scanned_page_with_text_layer_is_kept_and_marked(tmp_path):
+    """A scanned page (full-page image) that ALSO carries a usable text layer
+    (embedded OCR, or even just a footer watermark) keeps its text AND is
+    marked as scanned — text is never discarded. This is the OCR_doc case."""
+    import pymupdf
+
+    from app.extraction.extractors.pdf import PymupdfExtractor
+
+    pdf = tmp_path / "scan_with_text.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    rect = page.rect
+    pix = pymupdf.Pixmap(
+        pymupdf.csRGB, pymupdf.IRect(0, 0, int(rect.width), int(rect.height))
+    )
+    pix.clear_with(220)
+    page.insert_image(rect, pixmap=pix)  # full-page raster → scanned
+    page.insert_text(
+        (72, 72), "Embedded OCR text layer with well over fifty characters here."
+    )
+    doc.save(str(pdf))
+    doc.close()
+
+    ext = PymupdfExtractor(file_type="pdf")
+    result = ext.extract(str(pdf), "scan_with_text.pdf")
+    assert "Embedded OCR text layer" in result["plain_text"]  # text kept
+    assert result["scanned_pages"] == [1]                     # marked scanned
+    assert "skipped_pages" not in result                      # nothing skipped
+
+
+def _build_vector_pdf(path: Path, text: str, vector_pages: int) -> None:
+    """First page is real text; the rest are dense with vector drawings and no
+    text — mimicking a PDF whose body text is rendered as outlines (fonts
+    converted to curves), like the Tefal manual."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    try:
+        doc.new_page().insert_text((72, 72), text)
+        for _ in range(vector_pages):
+            page = doc.new_page()
+            for k in range(150):  # > MIN_VECTOR_OPS distinct paths, no text
+                y = 50 + k
+                page.draw_line((50, y), (550, y))
+        doc.save(str(path))
+    finally:
+        doc.close()
+
+
+def test_vector_outline_page_skipped_and_noted(tmp_path):
+    """A low-text page dense with vector drawings is unextractable like a scan
+    (no raster image), so it is skipped and noted while the text page survives."""
+    from app.extraction.extractors.pdf import PymupdfExtractor
+
+    pdf = tmp_path / "vector.pdf"
+    _build_vector_pdf(
+        pdf, "Hello real text page with well over fifty characters here.", 1
+    )
+    ext = PymupdfExtractor(file_type="pdf")
+    result = ext.extract(str(pdf), "vector.pdf")
+    assert "Hello real text" in result["plain_text"]
+    assert result["skipped_pages"] == [2]
+
+
+def test_blank_page_not_flagged_as_skipped(tmp_path):
+    """A genuinely blank page (no text, no drawings) is dropped silently — it is
+    NOT reported as a skipped page, so only real content loss is flagged."""
+    import pymupdf
+
+    from app.extraction.extractors.pdf import PymupdfExtractor
+
+    pdf = tmp_path / "blank.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text(
+        (72, 72), "Enough real text on page one to clear the fifty-char gate."
+    )
+    doc.new_page()  # page 2: truly blank
+    doc.save(str(pdf))
+    doc.close()
+
+    ext = PymupdfExtractor(file_type="pdf")
+    result = ext.extract(str(pdf), "blank.pdf")
+    assert "skipped_pages" not in result  # key omitted when nothing skipped
 
 
 @pytest.mark.skipif(not HAS_SOFFICE, reason="soffice not available")

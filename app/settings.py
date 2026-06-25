@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     azure_openai_embedding_api_key: str = ""
     azure_openai_embedding_deployment: str = ""
     azure_openai_embedding_model: str = ""
+    # Vector dimensions of the embedding model. Must match the deployed model:
+    # text-embedding-3-small / ada-002 = 1536, text-embedding-3-large = 3072.
+    # The search index is built with this size; a mismatch makes uploads fail.
+    embedding_dimensions: int = 1536
 
     # ---- Pipeline tuning ----
     embed_batch_size: int = 16

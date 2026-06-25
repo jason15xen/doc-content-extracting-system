@@ -9,7 +9,11 @@ import pymupdf
 from app.errors import ExtractionError
 from app.extraction.extractors.base import Extractor
 from app.extraction.ocr import ocr_page
-from app.extraction.scan_detect import is_scanned_page
+from app.extraction.scan_detect import (
+    has_scanned_image,
+    is_scanned_page,
+    is_vector_text_page,
+)
 
 _LOG = logging.getLogger("app.extract")
 
@@ -55,11 +59,17 @@ class PymupdfExtractor(Extractor):
     def extract_elements(self, path: str) -> list[dict[str, Any]]:
         elements: dict[int, dict[str, Any]] = {}
         scan_indices: list[int] = []
+        skipped: list[int] = []
+        scanned: list[int] = []
         ocr_eligible = self._ocr_pool is not None and self.file_type == "pdf"
         # Classifier-only mode targets PDFs (the only format that has
         # scanned content). For DOCX/PPTX the check is moot — scan_detect
         # always returns False on authored formats anyway.
         classify_only = self._reject_scanned and self.file_type == "pdf"
+        # Detection runs for every PDF page regardless of OCR/reject config, so
+        # scanned/unextractable pages can be labelled even when OCR is off.
+        # Authored formats never look scanned/outlined, so this is a no-op there.
+        detect = self.file_type == "pdf"
         total_pages = 0
 
         with pymupdf.open(path) as doc:
@@ -67,28 +77,46 @@ class PymupdfExtractor(Extractor):
                 total_pages = i
                 text = page.get_text() or ""
                 text_len = len(text.strip())
-                # Strong text layer — use it.
+                # A page-filling raster means the page is a scan, regardless of
+                # any text layer (which may be embedded OCR or just a footer
+                # watermark). Label it as scanned either way.
+                page_is_scan = detect and has_scanned_image(
+                    page, self._ocr_min_image_area
+                )
+                if page_is_scan:
+                    scanned.append(i)
+
+                # Usable text layer — keep it (even on a scanned page; we never
+                # discard real text). The scan label above still stands.
                 if text_len >= self._ocr_min_chars:
                     elements[i] = {"type": "page", "index": i, "text": text}
                     continue
-                # Thin or no text. Two outcomes:
-                #   (a) page is image-covered → OCR (or reject if classifier-only)
-                #   (b) page is blank/decorative → drop, OR keep the thin
-                #       text if it's the only signal we have (better than
-                #       nothing, mirrors today's behaviour for non-PDFs)
-                if (ocr_eligible or classify_only) and is_scanned_page(
-                    page, self._ocr_min_chars, self._ocr_min_image_area
-                ):
+
+                # No usable text. A page-filling scan with no readable text is
+                # the OCR / reject / skip case.
+                if page_is_scan:
                     if classify_only:
-                        # Short-circuit: one scanned page is enough to
+                        # Short-circuit: one unreadable scan is enough to
                         # reject. No need to walk the rest of the file.
                         raise ExtractionError(
                             f"rejected: scanned page detected at index {i} "
                             f"(OCR_REJECT_SCANNED=true)"
                         )
-                    scan_indices.append(i)
+                    if ocr_eligible:
+                        scan_indices.append(i)
+                    else:
+                        skipped.append(i)
+                    continue
+                # Not a raster scan. If the page is dense with vector drawings
+                # but yields no text, its content is rendered as outlines and is
+                # just as unextractable as a scan — skip and note it too.
+                if detect and is_vector_text_page(page, self._ocr_min_chars):
+                    skipped.append(i)
                 elif text_len > 0:
+                    # Genuinely thin (not a scan, not outlined) — keep what
+                    # little text we have.
                     elements[i] = {"type": "page", "index": i, "text": text}
+                # else: blank/decorative page → drop silently.
 
         if scan_indices and self._ocr_pool is not None:
             _LOG.info(
@@ -111,6 +139,16 @@ class PymupdfExtractor(Extractor):
                     elements[idx] = {
                         "type": "page", "index": idx, "text": ocr_text,
                     }
+                else:
+                    # OCR produced no text for this scanned page — it's dropped,
+                    # so record it as skipped (it's already in `scanned`).
+                    skipped.append(idx)
+
+        # Expose scanned pages (labelling) and skipped pages (dropped) so the
+        # pipeline can note both on the task file. Sorted because OCR-empty
+        # pages are appended above, out of page order.
+        self.scanned_pages = scanned
+        self.skipped_pages = sorted(skipped)
 
         return [elements[i] for i in sorted(elements)]
 

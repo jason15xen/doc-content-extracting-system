@@ -64,6 +64,7 @@
     .pill.completed, .pill.success { background: #1e3a2a; color: var(--ok); }
     .pill.failed { background: #3a1e1e; color: var(--err); }
     .pill.skipped { background: #2f2a1a; color: var(--warn); }
+    .pill.partial { background: #2f2a1a; color: var(--warn); }
     .pill.cancelled { background: #2a2f38; color: var(--muted); }
     .progress { display: flex; align-items: center; gap: 8px; }
     .progress-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
@@ -499,7 +500,7 @@ function renderTaskStatusCard(t) {
       <td><span class="pill ${f.status}">${esc(f.status)}</span></td>
       <td class="muted">${esc(f.current_step || '')}</td>
       <td class="muted">${esc(f.actionType || '')}</td>
-      <td style="color:${f.error?'var(--err)':'var(--muted)'}">${esc(f.error || '')}</td>
+      <td style="color:${f.error?'var(--err)':'#e0a458'}">${esc(f.error || f.reason || '')}</td>
     </tr>`).join('');
 
   return `
@@ -528,7 +529,7 @@ function renderTaskStatusCard(t) {
       </div>
       ${filesRows ? `
         <table style="margin-top:10px">
-          <thead><tr><th>File</th><th>Status</th><th>Step</th><th>Action</th><th>Error</th></tr></thead>
+          <thead><tr><th>File</th><th>Status</th><th>Step</th><th>Action</th><th>Note / Error</th></tr></thead>
           <tbody>${filesRows}</tbody>
         </table>` : ''}
       ${t.failed_files && t.failed_files.length ? `

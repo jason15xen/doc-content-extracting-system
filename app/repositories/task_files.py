@@ -58,6 +58,7 @@ async def set_progress(
     *,
     status: str | None = None,
     current_step: str | None = None,
+    reason: str | None = None,
     error: str | None = None,
     error_details: dict | None = None,
 ) -> None:
@@ -69,6 +70,8 @@ async def set_progress(
         values["status"] = status
     if current_step is not None:
         values["current_step"] = current_step
+    if reason is not None:
+        values["reason"] = reason
     if error is not None:
         values["error"] = error[:2000]
     if error_details is not None:

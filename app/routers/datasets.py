@@ -171,6 +171,7 @@ async def delete_dataset(
 async def list_dataset_documents(
     dataset_id: uuid.UUID,
     limit: int = 100,
+    offset: int = 0,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     ds = await datasets_repo.get(session, dataset_id)
@@ -180,12 +181,13 @@ async def list_dataset_documents(
             detail=f"Dataset ID '{dataset_id}' not found. Please use a valid dataset ID from GET /datasets.",
         )
     limit = max(1, min(limit, 1000))
-    rows, _total = await documents_repo.list_with_dataset_names(
-        session, limit=limit, offset=0, dataset_id=dataset_id
+    offset = max(0, offset)
+    rows, total = await documents_repo.list_with_dataset_names(
+        session, limit=limit, offset=offset, dataset_id=dataset_id
     )
     return {
         "dataset": _dataset_payload(ds),
-        "total_count": len(rows),
+        "total_count": total,
         "documents": [
             DocumentInfo(
                 id=doc.id,

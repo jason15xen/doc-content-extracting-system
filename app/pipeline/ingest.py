@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import os
 import time
@@ -28,6 +29,60 @@ from app.services.chunker import chunk_text
 _LOG = logging.getLogger("app.ingest")
 
 
+def _chunk_key(doc_id: str, chunk_index: int) -> str:
+    """Build an Azure AI Search document key for a chunk.
+
+    Azure restricts keys to letters, digits, '_', '-', and '='. Client-supplied
+    doc_ids can contain other characters (e.g. a filename like 'tefal.pdf' — the
+    '.' is rejected). URL-safe base64 maps any doc_id onto exactly the allowed
+    charset and is collision-free (a naive char-replace would merge 'a.b' and
+    'a-b'). The raw doc_id is still stored in the filterable `doc_id` field, so
+    search and delete-by-doc_id are unaffected, and the key is never parsed back.
+    """
+    token = base64.urlsafe_b64encode(doc_id.encode("utf-8")).decode("ascii")
+    return f"{token}_{chunk_index}"
+
+
+def _build_page_note(
+    scanned_pages: list[int], skipped_pages: list[int]
+) -> tuple[str | None, dict | None]:
+    """Build the task-file note for a successfully-indexed doc that contained
+    scanned and/or unextractable pages. Three categories:
+      - scanned page, text kept   -> "Scanned page"
+      - scanned page, no text     -> "Scanned page (skipped — no text)"
+      - non-scanned page skipped  -> "Skipped (no extractable text)" (e.g. vector
+                                      outlines: no raster image, no text layer)
+    `scanned_pages` are all page-filling-image pages; `skipped_pages` are all
+    dropped pages, so a page can be in both (scanned with no usable text).
+    Returns (reason, error_details), both None when there's nothing to note.
+    """
+    if not scanned_pages and not skipped_pages:
+        return None, None
+    skipped_set = set(skipped_pages)
+    scanned_set = set(scanned_pages)
+    kept_scanned = [p for p in scanned_pages if p not in skipped_set]
+    skipped_scanned = [p for p in scanned_pages if p in skipped_set]
+    skipped_other = [p for p in skipped_pages if p not in scanned_set]
+
+    def _fmt(pages: list[int]) -> str:
+        return ", ".join(str(p) for p in pages)
+
+    parts: list[str] = []
+    if kept_scanned:
+        parts.append(f"Scanned page: {_fmt(kept_scanned)}")
+    if skipped_scanned:
+        parts.append(f"Scanned page (skipped — no text): {_fmt(skipped_scanned)}")
+    if skipped_other:
+        parts.append(f"Skipped (no extractable text): {_fmt(skipped_other)}")
+
+    details: dict = {}
+    if scanned_pages:
+        details["scanned_pages"] = scanned_pages
+    if skipped_pages:
+        details["skipped_pages"] = skipped_pages
+    return "; ".join(parts), details
+
+
 async def run_ingest_task(task_id: uuid.UUID, doc_ids: Sequence[str]) -> None:
     ctx = get_context()
     await _run(ctx, task_id, list(doc_ids))
@@ -54,23 +109,27 @@ async def _run(
         ctx.settings.ingest_concurrency,
     )
 
-    failed_ids: list[str] = []
+    failed_ids: set[str] = set()
     failed_lock = asyncio.Lock()
 
     async def record_failure(doc_id: str, exc: BaseException) -> None:
+        # Per-doc error is already logged where it's caught; here we only need
+        # the set of failed doc_ids for the progress bump and final count.
         async with failed_lock:
-            failed_ids.append(f"{doc_id}:{type(exc).__name__}: {exc}")
+            failed_ids.add(doc_id)
 
     async def process_one(doc_id: str) -> None:
         doc_start = time.perf_counter()
+        skipped_pages: list[int] = []
         try:
             async with ctx.ingest_semaphore:
                 try:
-                    await _ingest_one(ctx, task_id, doc_id)
+                    skipped_pages = await _ingest_one(ctx, task_id, doc_id) or []
                     _LOG.info(
-                        "doc %s indexed in %.1fms",
+                        "doc %s indexed in %.1fms%s",
                         doc_id,
                         (time.perf_counter() - doc_start) * 1000.0,
+                        f" ({len(skipped_pages)} pages skipped)" if skipped_pages else "",
                     )
                 except Exception as exc:
                     _LOG.error(
@@ -85,12 +144,13 @@ async def _run(
             _LOG.error("doc %s setup failed: %s", doc_id, exc, exc_info=True)
             await record_failure(doc_id, exc)
 
-        # Progress bump after each doc — counts processed_files OR
-        # failed_file_count based on outcome. Best-effort; a failed bump
-        # won't kill the pipeline.
+        # Progress bump after each doc — counts processed OR failed. A doc that
+        # indexed with some pages skipped still counts as processed; the skip is
+        # recorded as a per-file note, not as a separate outcome. Best-effort;
+        # a failed bump won't kill the pipeline.
         try:
             async with ctx.sessionmaker() as ps:
-                if any(f.startswith(f"{doc_id}:") for f in failed_ids):
+                if doc_id in failed_ids:
                     await tasks_repo.bump_failed(ps, task_id)
                 else:
                     await tasks_repo.bump_processed(ps, task_id)
@@ -131,7 +191,7 @@ async def _ingest_one(
     ctx: PipelineContext,
     task_id: uuid.UUID,
     doc_id: str,
-) -> None:
+) -> list[int]:
     async with ctx.sessionmaker() as session:
         document = await documents_repo.get(session, doc_id)
         if document is None:
@@ -164,13 +224,7 @@ async def _ingest_one(
 
     current_step = ProcessingStep.EXTRACTING
     try:
-        # If this is an update of an existing doc, clear out the old chunks
-        # from Azure Search first so re-indexing doesn't leave stale chunks
-        # behind (the new chunk count may be smaller than the old one).
-        if action_type == TaskFileAction.UPDATE.value:
-            await ctx.search.delete_by_doc_ids([doc_id])
-
-        chunks, vectors = await _extract_chunk_embed(
+        chunks, vectors, skipped_pages, scanned_pages = await _extract_chunk_embed(
             ctx, task_id, doc_id, doc_name, doc_storage_path
         )
 
@@ -183,6 +237,13 @@ async def _ingest_one(
                 current_step=ProcessingStep.INDEXING.value,
             )
             await session.commit()
+
+        # Update path: now that the new chunks + vectors are built, drop the
+        # old chunks just before writing the new ones. Deleting only after
+        # extract/embed succeed means a mid-flight failure can never leave the
+        # document with its old chunks gone and no replacement indexed.
+        if action_type == TaskFileAction.UPDATE.value:
+            await ctx.search.delete_by_doc_ids([doc_id])
 
         await _upsert_chunks(
             ctx,
@@ -205,14 +266,31 @@ async def _ingest_one(
                     updated_at=datetime.now(timezone.utc),
                 )
             )
+            # The doc is indexed on its extractable pages, so it counts as
+            # processed/completed. Attach a visible note when the document
+            # contains scanned pages (text kept) and/or pages whose content
+            # couldn't be extracted (skipped) — so neither is silent.
+            note_reason, note_details = _build_page_note(scanned_pages, skipped_pages)
+            # A file with scanned and/or unextractable pages is "partial" — it
+            # indexed, but not all content was cleanly captured. A clean file
+            # (no note) is "completed".
+            file_status = (
+                TaskFileStatus.PARTIAL.value
+                if note_reason
+                else TaskFileStatus.COMPLETED.value
+            )
             await task_files_repo.set_progress(
                 session,
                 task_id,
                 doc_id,
-                status=TaskFileStatus.COMPLETED.value,
+                status=file_status,
                 current_step=ProcessingStep.COMPLETED.value,
+                reason=note_reason,
+                error_details=note_details,
             )
             await session.commit()
+
+        return skipped_pages
 
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
@@ -260,7 +338,7 @@ async def _extract_chunk_embed(
     doc_id: str,
     doc_name: str,
     storage_path: str | None,
-) -> tuple[list[str], list[list[float]]]:
+) -> tuple[list[str], list[list[float]], list[int], list[int]]:
     if storage_path is None:
         raise PipelineError(ProcessingStep.EXTRACTING.value, "storage path missing")
 
@@ -270,8 +348,19 @@ async def _extract_chunk_embed(
     t0 = time.perf_counter()
     result = await run_in_threadpool(extractor.extract, storage_path, doc_name)
     plain_text: str = (result.get("plain_text") or "").strip()
+    skipped_pages: list[int] = result.get("skipped_pages") or []
+    scanned_pages: list[int] = result.get("scanned_pages") or []
     if not plain_text:
+        # All pages were unusable (e.g. a fully-scanned PDF with no text layer)
+        # — fail the doc.
         raise PipelineError(ProcessingStep.EXTRACTING.value, "empty extraction")
+    if scanned_pages or skipped_pages:
+        _LOG.info(
+            "doc %s: %d scanned page(s) %s, %d skipped %s",
+            doc_id,
+            len(scanned_pages), scanned_pages,
+            len(skipped_pages), skipped_pages,
+        )
     _LOG.info(
         "doc %s extracted: %s, %d chars in %.1fms",
         doc_id,
@@ -320,7 +409,7 @@ async def _extract_chunk_embed(
         len(vectors),
         (time.perf_counter() - t0) * 1000.0,
     )
-    return chunks, vectors
+    return chunks, vectors, skipped_pages, scanned_pages
 
 
 async def _upsert_chunks(
@@ -336,7 +425,7 @@ async def _upsert_chunks(
     uploaded_iso = uploaded_at.isoformat()
     search_docs = [
         {
-            "id": f"{doc_id}_{i}",
+            "id": _chunk_key(doc_id, i),
             "doc_id": str(doc_id),
             "doc_name": doc_name,
             "dataset_id": str(dataset_id) if dataset_id else None,

@@ -8,6 +8,14 @@ class Extractor(ABC):
     def __init__(self, file_type: str | None = None) -> None:
         if file_type is not None:
             self.file_type = file_type
+        # Page indices (1-based) that were detected as scanned and dropped
+        # during extraction. Populated by extractors that do scan detection
+        # (currently PDF); stays empty for all others.
+        self.skipped_pages: list[int] = []
+        # Page indices (1-based) detected as scanned (page-filling raster),
+        # whether or not their text was kept. Used to label the document as
+        # containing scanned content.
+        self.scanned_pages: list[int] = []
 
     @abstractmethod
     def extract_elements(self, path: str) -> list[dict[str, Any]]:
@@ -15,11 +23,18 @@ class Extractor(ABC):
 
     def extract(self, path: str, filename: str) -> dict[str, Any]:
         elements = self.extract_elements(path)
-        return {
+        out: dict[str, Any] = {
             "filename": filename,
             "file_type": self.file_type,
             "plain_text": elements_to_plain_text(elements),
         }
+        # Only surface these keys when relevant, so the common response shape
+        # is unchanged for ordinary documents.
+        if self.skipped_pages:
+            out["skipped_pages"] = list(self.skipped_pages)
+        if self.scanned_pages:
+            out["scanned_pages"] = list(self.scanned_pages)
+        return out
 
 
 def elements_to_plain_text(elements: list[dict[str, Any]]) -> str:

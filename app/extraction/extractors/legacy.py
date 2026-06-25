@@ -17,10 +17,11 @@ LEGACY_TARGET = {
 class LegacyExtractor(Extractor):
     def __init__(self, ext: str) -> None:
         self.ext = ext.lower()
+        # Initialise base state (file_type, skipped_pages, scanned_pages).
+        super().__init__(file_type=self.ext.lstrip("."))
         target_format, delegate = LEGACY_TARGET[self.ext]
         self.target_format = target_format
         self.delegate = delegate
-        self.file_type = self.ext.lstrip(".")
 
     def extract_elements(self, path: str) -> list[dict[str, Any]]:
         converted = libreoffice.convert(path, self.target_format)

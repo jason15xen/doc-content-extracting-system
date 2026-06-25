@@ -39,6 +39,9 @@ class TaskFileStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    # Indexed, but the file contained scanned and/or unextractable pages — i.e.
+    # processed with caveats, not a clean completion.
+    PARTIAL = "partial"
 
 
 class TaskFileAction(str, enum.Enum):
@@ -164,7 +167,7 @@ class TaskFile(Base):
     __tablename__ = "task_files"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','processing','completed','failed','skipped')",
+            "status IN ('pending','processing','completed','failed','skipped','partial')",
             name="ck_task_files_status",
         ),
         CheckConstraint(

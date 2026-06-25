@@ -18,6 +18,7 @@ def main() -> int:
     index = build_index(
         settings.azure_search_index,
         enable_semantic=settings.enable_semantic_ranking,
+        dimensions=settings.embedding_dimensions,
     )
     json.dump(index.serialize(), sys.stdout, indent=2)
     sys.stdout.write("\n")
