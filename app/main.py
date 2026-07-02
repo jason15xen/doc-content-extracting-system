@@ -20,6 +20,7 @@ from app.services.chat import Chatter
 from app.services.embeddings import Embedder
 from app.services.logging_setup import setup_file_logging
 from app.services.search_index import SearchGateway
+from app.services.storage import try_unlink
 from app.settings import get_settings
 
 
@@ -85,8 +86,12 @@ async def lifespan(app: FastAPI):
     # but log the cause so silent boot-time DB issues are recoverable.
     try:
         async with sessionmaker() as session:
-            await tasks_repo.reconcile_running_tasks(session)
+            orphan_paths = await tasks_repo.reconcile_running_tasks(session)
             await session.commit()
+        # Delete leftover upload temp files of the interrupted docs so they
+        # don't leak on disk across restarts.
+        for path in orphan_paths:
+            try_unlink(path)
     except Exception:
         logging.getLogger("app").exception(
             "reconcile_running_tasks failed at startup"

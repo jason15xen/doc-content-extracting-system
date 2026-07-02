@@ -5,7 +5,15 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentStatus, Task, TaskAction, TaskStatus
+from app.db.models import (
+    Document,
+    DocumentStatus,
+    Task,
+    TaskAction,
+    TaskFile,
+    TaskFileStatus,
+    TaskStatus,
+)
 
 
 async def create(
@@ -145,27 +153,126 @@ async def list_paginated(
     return rows, total
 
 
-async def reconcile_running_tasks(session: AsyncSession) -> int:
-    """On boot, mark `processing` tasks as `failed` (interrupted by restart)
-    and flip in-flight documents back to `failed`."""
+async def reconcile_running_tasks(session: AsyncSession) -> list[str]:
+    """On boot, fail any work left mid-flight by a restart.
+
+    Ingest/delete jobs run as in-process background tasks that don't survive a
+    restart, so anything still `pending` or `processing` at startup is orphaned
+    — nothing will resume it. Mark those tasks, documents, AND task_files
+    `failed` with a clear reason so they're visible instead of stuck forever,
+    rather than leaving un-started docs `pending` indefinitely.
+
+    We do NOT re-queue — interrupted uploads must be re-submitted. Returns the
+    orphaned documents' storage paths so the caller can delete their leftover
+    upload temp files (otherwise they'd leak on disk).
+    """
     now = datetime.now(timezone.utc)
-    stmt = (
-        update(Task)
-        .where(Task.status == TaskStatus.PROCESSING.value)
+    doc_unfinished = (
+        DocumentStatus.PENDING.value,
+        DocumentStatus.PROCESSING.value,
+    )
+
+    # Grab temp-file paths before we clear them, so the caller can unlink.
+    orphan_paths = list(
+        (
+            await session.execute(
+                select(Document.storage_path).where(
+                    Document.status.in_(doc_unfinished),
+                    Document.storage_path.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    tf_unfinished = (
+        TaskFileStatus.PENDING.value,
+        TaskFileStatus.PROCESSING.value,
+    )
+    # Snapshot the interrupted (pending/processing) task ids BEFORE flipping
+    # them. The task_file updates below are scoped to these tasks only —
+    # cancelled tasks can legitimately leave `pending` task_file rows behind
+    # (cancel deletes the docs but not the rows), and those must not be
+    # relabelled "server restart" nor have their counters bumped.
+    interrupted_task_ids = list(
+        (
+            await session.execute(
+                select(Task.id).where(
+                    Task.status.in_(
+                        (TaskStatus.PENDING.value, TaskStatus.PROCESSING.value)
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Count the soon-to-be-failed files per task BEFORE flipping them, so the
+    # tasks' failed_file_count summary matches the failed_files list.
+    per_task_counts = []
+    if interrupted_task_ids:
+        per_task_counts = (
+            await session.execute(
+                select(TaskFile.task_id, func.count())
+                .where(
+                    TaskFile.status.in_(tf_unfinished),
+                    TaskFile.task_id.in_(interrupted_task_ids),
+                )
+                .group_by(TaskFile.task_id)
+            )
+        ).all()
+
+    # Interrupted tasks → failed. Handling `pending` too covers the case where
+    # the restart hit before the worker even started.
+    if interrupted_task_ids:
+        await session.execute(
+            update(Task)
+            .where(Task.id.in_(interrupted_task_ids))
+            .values(
+                status=TaskStatus.FAILED.value,
+                error_message="server restart",
+                completed_at=now,
+                updated_at=now,
+            )
+        )
+        await session.execute(
+            update(TaskFile)
+            .where(
+                TaskFile.status.in_(tf_unfinished),
+                TaskFile.task_id.in_(interrupted_task_ids),
+            )
+            .values(
+                status=TaskFileStatus.FAILED.value,
+                current_step="failed",
+                error="server restart",
+                updated_at=now,
+            )
+        )
+    # Documents are flipped unconditionally: an orphaned pending/processing doc
+    # can also exist without any live task (e.g. a crash between the upload
+    # commit and task creation), and nothing will ever resume it either.
+    await session.execute(
+        update(Document)
+        .where(Document.status.in_(doc_unfinished))
         .values(
-            status=TaskStatus.FAILED.value,
-            error_message="interrupted by restart",
-            completed_at=now,
+            status=DocumentStatus.FAILED.value,
+            storage_path=None,
             updated_at=now,
         )
     )
-    result = await session.execute(stmt)
-    await session.execute(
-        update(Document)
-        .where(Document.status == DocumentStatus.PROCESSING.value)
-        .values(status=DocumentStatus.FAILED.value)
-    )
-    return result.rowcount or 0
+    # Back-fill each affected task's failed counter with the files just failed.
+    for task_id, cnt in per_task_counts:
+        await session.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                failed_file_count=Task.failed_file_count + cnt,
+                updated_at=now,
+            )
+        )
+    return orphan_paths
 
 
 async def clear_history(session: AsyncSession) -> int:

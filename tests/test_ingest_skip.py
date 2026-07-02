@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.db.models  # noqa: F401  (register mappers on Base.metadata)
 from app.db.base import Base
-from app.db.models import DocumentStatus, TaskAction, TaskFileStatus
+from app.db.models import DocumentStatus, TaskAction, TaskFileStatus, TaskStatus
 from app.pipeline.context import PipelineContext
 from app.pipeline.ingest import _run
 from app.repositories import documents as documents_repo
@@ -212,3 +212,73 @@ def test_list_documents_pagination_reports_true_total(tmp_path):
     n1, t1, n_last, t2 = asyncio.run(_body())
     assert (n1, t1) == (2, 5)       # first page caps at limit, total is the true count
     assert (n_last, t2) == (1, 5)   # offset past the first pages returns the tail
+
+
+def test_reconcile_fails_orphaned_work_and_returns_temp_paths(tmp_path):
+    """Restart-recovery fix (#2): an interrupted batch leaves a PROCESSING task
+    plus PENDING docs/task_files. reconcile must fail all three (no silent
+    orphans) and hand back the temp-file paths to clean up (no disk leak)."""
+    async def _body():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'rag.db'}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        temp = tmp_path / "orphan.pdf"
+        temp.write_text("leftover upload")
+        async with sm() as s:
+            await documents_repo.create(
+                s, doc_id="d1", name="orphan.pdf", hash_="h1", description=None,
+                dataset_id=None, storage_path=str(temp), file_size=1,
+            )  # left PENDING (never started)
+            task = await tasks_repo.create(s, action=TaskAction.UPLOAD, total_files=1)
+            await s.commit()
+            tid = task.id
+            await tasks_repo.mark_started(s, tid)  # task -> processing
+            await task_files_repo.create_many(
+                s, tid,
+                [{"filename": "orphan.pdf", "doc_id": "d1",
+                  "status": TaskFileStatus.PENDING.value, "action_type": "create"}],
+            )
+            await s.commit()
+        # A CANCELLED task with a leftover pending task_file (cancel deletes the
+        # docs but not the rows) must NOT be touched by reconcile.
+        async with sm() as s:
+            cancelled = await tasks_repo.create(
+                s, action=TaskAction.UPLOAD, total_files=1
+            )
+            await s.commit()
+            cid = cancelled.id
+            await task_files_repo.create_many(
+                s, cid,
+                [{"filename": "cancelled.pdf", "doc_id": "d2",
+                  "status": TaskFileStatus.PENDING.value, "action_type": "create"}],
+            )
+            await tasks_repo.mark_cancelled(s, cid)
+            await s.commit()
+
+        async with sm() as s:
+            paths = await tasks_repo.reconcile_running_tasks(s)
+            await s.commit()
+        async with sm() as s:
+            doc = await documents_repo.get(s, "d1")
+            tf = await task_files_repo.get_by_task_and_doc(s, tid, "d1")
+            tk = await tasks_repo.get(s, tid)
+            ctf = await task_files_repo.get_by_task_and_doc(s, cid, "d2")
+            ctk = await tasks_repo.get(s, cid)
+        await engine.dispose()
+        return doc, tf, tk, paths, str(temp), ctf, ctk
+
+    doc, tf, tk, paths, temp, ctf, ctk = asyncio.run(_body())
+    assert tk.status == TaskStatus.FAILED.value
+    assert tk.error_message == "server restart"
+    assert doc.status == DocumentStatus.FAILED.value and doc.storage_path is None
+    assert tf.status == TaskFileStatus.FAILED.value
+    assert tf.error == "server restart"
+    # Summary counter back-filled to match the failed_files list.
+    assert tk.failed_file_count == 1
+    assert temp in paths   # caller unlinks these leftover temp files
+    # Cancelled task untouched: file stays pending, no counter bump, no relabel.
+    assert ctk.status == TaskStatus.CANCELLED.value
+    assert ctk.failed_file_count == 0
+    assert ctf.status == TaskFileStatus.PENDING.value
+    assert ctf.error is None
