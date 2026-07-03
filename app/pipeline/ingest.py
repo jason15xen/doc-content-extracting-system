@@ -84,8 +84,37 @@ def _build_page_note(
 
 
 async def run_ingest_task(task_id: uuid.UUID, doc_ids: Sequence[str]) -> None:
-    ctx = get_context()
-    await _run(ctx, task_id, list(doc_ids))
+    """BackgroundTasks entrypoint. The outer try/except guarantees that even a
+    catastrophic crash gets logged AND the task marked failed — an uncaught
+    exception in a background task is silently swallowed by Starlette's
+    runner, which would leave the task stuck at `processing` forever with no
+    log trace (same guard as run_delete_task)."""
+    try:
+        ctx = get_context()
+    except Exception:
+        _LOG.exception(
+            "run_ingest_task: pipeline context missing for task %s", task_id
+        )
+        return
+    try:
+        await _run(ctx, task_id, list(doc_ids))
+    except Exception as exc:
+        _LOG.exception("run_ingest_task crashed for task %s", task_id)
+        # Best-effort: surface the crash on the task row instead of leaving it
+        # pending/processing forever.
+        try:
+            async with ctx.sessionmaker() as session:
+                await tasks_repo.mark_completed(
+                    session,
+                    task_id,
+                    failed=True,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
+                await session.commit()
+        except Exception:
+            _LOG.exception(
+                "failed to mark crashed ingest task %s as failed", task_id
+            )
 
 
 async def _run(

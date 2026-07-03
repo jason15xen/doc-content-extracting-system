@@ -282,3 +282,47 @@ def test_reconcile_fails_orphaned_work_and_returns_temp_paths(tmp_path):
     assert ctk.failed_file_count == 0
     assert ctf.status == TaskFileStatus.PENDING.value
     assert ctf.error is None
+
+
+def test_run_ingest_task_crash_is_logged_and_marks_task_failed(tmp_path, monkeypatch):
+    """Crash-guard fix: if the ingest pipeline blows up early, the background
+    entrypoint must not swallow it silently — the task must end up FAILED with
+    the error message, not stuck at pending/processing forever."""
+    from app.pipeline import context as pipeline_context
+    from app.pipeline import ingest as ingest_mod
+
+    async def _body():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'rag.db'}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        async with sm() as s:
+            task = await tasks_repo.create(s, action=TaskAction.UPLOAD, total_files=1)
+            await s.commit()
+            tid = task.id
+
+        ctx = PipelineContext(
+            settings=get_settings(), sessionmaker=sm, embedder=_StubEmbedder(),
+            chatter=None, search=_StubSearch(),
+            ingest_semaphore=asyncio.Semaphore(1), ocr_pool=None,
+        )
+        pipeline_context.set_context(ctx)
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("db exploded before the batch started")
+
+        monkeypatch.setattr(ingest_mod, "_run", _boom)
+        try:
+            # Must not raise (Starlette would swallow it) — handled internally.
+            await ingest_mod.run_ingest_task(tid, ["d1"])
+        finally:
+            pipeline_context.clear_context()
+
+        async with sm() as s:
+            tk = await tasks_repo.get(s, tid)
+        await engine.dispose()
+        return tk
+
+    tk = asyncio.run(_body())
+    assert tk.status == TaskStatus.FAILED.value
+    assert "db exploded" in (tk.error_message or "")

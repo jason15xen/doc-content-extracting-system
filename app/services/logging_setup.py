@@ -18,8 +18,10 @@ _DATED_RE = re.compile(r"^app-(\d{4}-\d{2}-\d{2})\.txt$")
 
 class _AccessLogPollFilter(logging.Filter):
     """Drop the UI's high-frequency task-status polls from the access log.
-    The Tasks tab hits GET /tasks every 2s and the upload box hits
-    GET /tasks/{id} every 1.5s — useful in devtools, just noise in the file."""
+    The Tasks tab hits GET /doc/tasks every 2s and the upload progress widget
+    hits GET /doc/status/{id} every 1.5s — useful in devtools, just noise in
+    the file. Paths must match the real routes (they live under the /doc
+    prefix); POST/DELETE on these paths are user actions and are kept."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
@@ -28,7 +30,11 @@ class _AccessLogPollFilter(logging.Filter):
         method, path = args[1], args[2]
         if method != "GET":
             return True
-        return not (path == "/tasks" or path.startswith("/tasks?") or path.startswith("/tasks/"))
+        return not (
+            path == "/doc/tasks"
+            or path.startswith("/doc/tasks?")
+            or path.startswith("/doc/status/")
+        )
 
 
 def _namer(default_name: str) -> str:
