@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_session
 from app.pipeline.delete import run_dataset_cascade_task
+from app.routers.documents import _check_no_active_task
 from app.db.models import TaskAction, Dataset
 from app.repositories import datasets as datasets_repo
 from app.repositories import documents as documents_repo
@@ -113,6 +114,8 @@ async def delete_dataset(
     - ``keep_documents=true``: leave documents in place (their dataset_id is
       cleared by the FK cascade) and only remove the dataset row.
     """
+    await _check_no_active_task(session)
+
     ds = await datasets_repo.get(session, dataset_id)
     if ds is None:
         raise HTTPException(

@@ -143,6 +143,10 @@ def test_upload_and_delete_rejected_while_task_active(client):
     r = client.request("DELETE", "/doc", json={"doc_ids": ["x"]})
     assert r.status_code == 409
 
+    # Dataset cascade-delete blocked as well (sample-api guards it too).
+    r = client.delete(f"/datasets/{uuid.uuid4()}")
+    assert r.status_code == 409
+
     # Lock releases once the task finishes.
     _run(_complete_all_tasks(client.sessionmaker))
     r = _upload(client, "doc-3", b"whatever")
