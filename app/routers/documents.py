@@ -67,6 +67,37 @@ def _doc_to_info(doc, dataset_name: str | None) -> DocumentInfo:
     )
 
 
+async def _check_no_active_task(session: AsyncSession) -> None:
+    """Sample-api parity: reject a new upload/delete with 409 while another
+    task is still running. Serializing batches also keeps concurrent ingests
+    from piling onto the shared Azure OpenAI quota (the cause of throttled
+    embeds and 40s queries)."""
+    active = await tasks_repo.get_active(session)
+    if active is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": (
+                f"A {active.action} task is already running. "
+                "Wait for it to complete or cancel it."
+            ),
+            "active_task": {
+                "task_id": str(active.id),
+                "action": active.action,
+                "status": active.status,
+                "total_files": active.total_files,
+                "processed_files": active.processed_files,
+                "failed_files": active.failed_file_count,
+                "created_at": active.created_at.isoformat()
+                if active.created_at
+                else None,
+                "status_url": f"/doc/status/{active.id}",
+            },
+        },
+    )
+
+
 def _parse_items(items_raw: str) -> list[dict]:
     """Sample-api accepts the items payload as either a bare array or an
     object with an `items` key. Mirror that."""
@@ -103,6 +134,8 @@ async def upload_documents(
 ) -> AsyncUploadResponse:
     if not files:
         raise HTTPException(status_code=422, detail="no files provided")
+
+    await _check_no_active_task(session)
 
     items_list = _parse_items(items)
 
@@ -229,13 +262,18 @@ async def upload_documents(
 
             is_update = True
             action_type = TaskFileAction.UPDATE
+            # A re-upload that doesn't resend dataset/description keeps the
+            # existing values — otherwise updating a file's content would
+            # silently clear its metadata and drop it out of its dataset.
             await documents_repo.replace(
                 session,
                 existing,
                 name=target_name,
                 hash_=hash_hex,
-                description=description,
-                dataset_id=dataset_uuid,
+                description=description
+                if description is not None
+                else existing.description,
+                dataset_id=dataset_uuid if dataset else existing.dataset_id,
                 storage_path=str(scratch_path),
                 file_size=size,
             )
@@ -415,6 +453,8 @@ async def delete_documents(
     if not body.doc_ids:
         raise HTTPException(status_code=400, detail="No document IDs provided")
 
+    await _check_no_active_task(session)
+
     docs = await documents_repo.bulk_get(session, body.doc_ids)
     found = {d.id: d for d in docs}
     documents_info: list[DocumentDeleteInfo] = []
@@ -479,6 +519,8 @@ async def delete_all_documents(
     background: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> AsyncDeleteResponse:
+    await _check_no_active_task(session)
+
     docs = list(await documents_repo.bulk_get(session, await documents_repo.list_all_ids(session)))
     if not docs:
         raise HTTPException(status_code=404, detail="No documents found")

@@ -43,6 +43,22 @@ async def get(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
     return await session.get(Task, task_id)
 
 
+async def get_active(session: AsyncSession) -> Task | None:
+    """Oldest task still pending/processing, or None. Backs the sample-api
+    409 lock: only one upload/delete batch may run at a time."""
+    stmt = (
+        select(Task)
+        .where(
+            Task.status.in_(
+                (TaskStatus.PENDING.value, TaskStatus.PROCESSING.value)
+            )
+        )
+        .order_by(Task.created_at.asc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def mark_started(session: AsyncSession, task_id: uuid.UUID) -> None:
     now = datetime.now(timezone.utc)
     await session.execute(
