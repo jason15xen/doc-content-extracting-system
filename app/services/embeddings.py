@@ -107,6 +107,35 @@ class Embedder:
             out.extend(vectors)
         return out
 
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed one interactive query on a priority lane.
+
+        Two deliberate differences from the ingest path (embed_many):
+          1. Does NOT take the batch semaphore — a user query must never queue
+             behind up to N in-flight ingest batches of 64 texts each.
+          2. Fail-fast retry (3 quick attempts, ~2s of backoff total) instead
+             of the batch ladder (5 attempts, up to ~31s). Under heavy Azure
+             throttling it's better to fail the search in a few seconds than
+             to hang it for half a minute.
+        """
+        vectors = await self._embed_query_call(text)
+        if not vectors or not vectors[0]:
+            raise EmbeddingError("query embedding returned no vector")
+        return vectors[0]
+
+    @retry(
+        retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
+        stop=stop_after_attempt(3),
+        reraise=True,
+        before_sleep=before_sleep_log(_LOG, logging.WARNING),
+    )
+    async def _embed_query_call(self, text: str) -> list[list[float]]:
+        resp = await self._client.embeddings.create(
+            model=self._deployment, input=[text]
+        )
+        return [item.embedding for item in resp.data]
+
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
         wait=wait_exponential(multiplier=1, min=1, max=20),

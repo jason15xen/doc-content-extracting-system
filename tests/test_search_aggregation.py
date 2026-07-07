@@ -24,6 +24,9 @@ class StubEmbedder:
     async def embed_many(self, texts: list[str]) -> list[list[float]]:
         return [[0.0] * 1536 for _ in texts]
 
+    async def embed_query(self, text: str) -> list[float]:
+        return [0.0] * 1536
+
     async def aclose(self) -> None:
         pass
 

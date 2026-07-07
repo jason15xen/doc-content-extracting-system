@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from openai import APIConnectionError, RateLimitError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import (
@@ -88,10 +89,18 @@ async def query(
             )
         dataset_name = ds.name
 
-    vectors = await embedder.embed_many([body.query])
-    if not vectors:
-        raise HTTPException(status_code=500, detail="failed to embed query")
-    query_vec = vectors[0]
+    # Priority lane: never queue the user's query behind bulk-ingest embedding
+    # batches. Fails fast under heavy throttling instead of hanging ~40s.
+    try:
+        query_vec = await embedder.embed_query(body.query)
+    except (RateLimitError, APIConnectionError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Embedding service is busy (likely a large ingest in "
+                "progress). Please retry in a moment."
+            ),
+        ) from exc
 
     rows = await search_gw.hybrid_search(
         body.query,
