@@ -65,6 +65,9 @@ class StubCtx:
         search_top_k_chunks = 30
         search_top_k_docs = 5
         chat_max_context_chunks = 12
+        # Aggregation tests exercise the classic single-search path; the
+        # agentic layer is covered in test_agentic_search.py.
+        agentic_search_enabled = False
 
     settings = _Settings()
 
@@ -105,6 +108,7 @@ def client_with_rows(monkeypatch):
     app.dependency_overrides[deps.get_search] = lambda: stub_search
     app.dependency_overrides[deps.get_embedder] = lambda: stub_embedder
     app.dependency_overrides[deps.get_chatter] = lambda: stub_chatter
+    app.dependency_overrides[deps.get_planner] = lambda: None
     app.dependency_overrides[deps.get_pipeline_context] = lambda: StubCtx()
 
     with TestClient(app) as client:
@@ -157,6 +161,7 @@ def test_empty_results_skips_chat(monkeypatch):
     app.dependency_overrides[deps.get_search] = lambda: stub_search
     app.dependency_overrides[deps.get_embedder] = lambda: stub_embedder
     app.dependency_overrides[deps.get_chatter] = lambda: ExplodingChatter()
+    app.dependency_overrides[deps.get_planner] = lambda: None
     app.dependency_overrides[deps.get_pipeline_context] = lambda: StubCtx()
 
     try:

@@ -52,6 +52,23 @@ class Settings(BaseSettings):
     search_top_k_docs: int = 5
     chat_max_context_chunks: int = 12
 
+    # ---- Agentic search (POST /query) ----
+    # An LLM planner decides whether a question is a single focused need
+    # (→ one hybrid search, exactly the classic path) or needs several
+    # focused sub-queries run in parallel; a judge call may then request a
+    # few follow-up searches. Hard cap on index searches per request is
+    # agentic_max_searches, enforced in code regardless of model output.
+    agentic_search_enabled: bool = True
+    agentic_max_subqueries: int = 3
+    agentic_max_searches: int = 5
+    # Chunks fetched per sub-query. Lower than search_top_k_chunks so the
+    # merged candidate pool (sub-queries × this) stays close to a classic
+    # single search after dedup. 0 = use search_top_k_chunks.
+    agentic_subquery_top_k: int = 15
+    # Per-call timeout for the planner/judge LLM calls. On timeout the
+    # request degrades to a plain hybrid search instead of hanging.
+    agentic_llm_timeout_s: float = 20.0
+
     ingest_concurrency: int = 2
     # Per-instance caps on concurrent calls to upstream services. Tune
     # downward if you hit Azure OpenAI TPM limits or Azure Search 503s.

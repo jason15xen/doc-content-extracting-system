@@ -12,6 +12,7 @@ from app.deps import (
     get_chatter,
     get_embedder,
     get_pipeline_context,
+    get_planner,
     get_search,
     get_session,
 )
@@ -26,21 +27,12 @@ from app.schemas.query import (
 )
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
+from app.services.query_planner import QueryPlanner, add_usage
+from app.services.retrieval import raw_score, retrieve
 from app.services.search_index import SearchGateway
 
 router = APIRouter(tags=["query"])
 _LOG = logging.getLogger("app.query")
-
-
-def _raw_score(row: dict[str, Any]) -> float:
-    reranker = row.get("@search.reranker_score")
-    if isinstance(reranker, (int, float)):
-        return float(reranker)
-    score = row.get("@search.score", 0.0)
-    try:
-        return float(score)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _to_percentage(score: float, max_score: float) -> float:
@@ -61,6 +53,7 @@ async def query(
     embedder: Embedder = Depends(get_embedder),
     chatter: Chatter = Depends(get_chatter),
     search_gw: SearchGateway = Depends(get_search),
+    planner: QueryPlanner | None = Depends(get_planner),
 ) -> QueryResponse:
     started = time.perf_counter()
     query_preview = body.query[:120].replace("\n", " ")
@@ -89,10 +82,19 @@ async def query(
             )
         dataset_name = ds.name
 
-    # Priority lane: never queue the user's query behind bulk-ingest embedding
-    # batches. Fails fast under heavy throttling instead of hanging ~40s.
+    # Agentic retrieval: planner → ≤N parallel sub-queries → judge → ≤M
+    # follow-ups, hard-capped in code. Single-intent questions run exactly
+    # one hybrid search. Query embeddings use the priority lane (never queue
+    # behind bulk-ingest batches; fail fast under heavy throttling).
     try:
-        query_vec = await embedder.embed_query(body.query)
+        retrieval = await retrieve(
+            body.query,
+            dataset_id=dataset_uuid,
+            embedder=embedder,
+            search_gw=search_gw,
+            planner=planner,
+            settings=ctx.settings,
+        )
     except (RateLimitError, APIConnectionError) as exc:
         raise HTTPException(
             status_code=503,
@@ -102,22 +104,29 @@ async def query(
             ),
         ) from exc
 
-    rows = await search_gw.hybrid_search(
-        body.query,
-        query_vec,
-        top_k=ctx.settings.search_top_k_chunks,
-        dataset_id=dataset_uuid,
+    rows = retrieval.rows
+    _LOG.info(
+        "query retrieved %d chunks from index (%d search(es), single_intent=%s, "
+        "subqueries=%r, followups=%r)",
+        len(rows),
+        retrieval.searches,
+        retrieval.single_intent,
+        retrieval.subqueries,
+        retrieval.followups,
     )
-    _LOG.info("query retrieved %d chunks from index", len(rows))
 
     if not rows:
+        planning_usage = retrieval.token_usage
         return QueryResponse(
             query=body.query,
             answer="No matching documents.",
             from_cache=False,
             files=[],
             dataset=body.dataset,
-            token_usage=None,
+            token_usage=(
+                TokenUsageInfo(**planning_usage)
+                if planning_usage.get("total_tokens") else None
+            ),
         )
 
     by_doc: dict[str, dict[str, Any]] = defaultdict(
@@ -125,7 +134,7 @@ async def query(
     )
     for row in rows:
         did = row["doc_id"]
-        s = _raw_score(row)
+        s = raw_score(row)
         by_doc[did]["doc_name"] = row["doc_name"]
         if s > by_doc[did]["score_max"]:
             by_doc[did]["score_max"] = s
@@ -157,6 +166,8 @@ async def query(
     contexts = all_chunks[: ctx.settings.chat_max_context_chunks]
 
     answer_text, usage = await chatter.answer(body.query, contexts)
+    # token_usage covers the whole request: planner + judge + answer.
+    usage = add_usage(retrieval.token_usage, usage)
     _LOG.info(
         "query served in %.1fms (chat ctx: %d chunks)",
         (time.perf_counter() - started) * 1000.0,

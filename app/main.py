@@ -19,6 +19,7 @@ from app.routers import admin, datasets, documents, extract, health, query, task
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
 from app.services.logging_setup import setup_file_logging
+from app.services.query_planner import QueryPlanner
 from app.services.search_index import SearchGateway
 from app.services.storage import try_unlink
 from app.settings import get_settings
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
     search_gw = SearchGateway(settings)
     embedder = Embedder(settings)
     chatter = Chatter(settings)
+    planner = QueryPlanner(settings)
 
     if settings.ensure_index_on_startup and settings.azure_search_endpoint:
         try:
@@ -75,6 +77,7 @@ async def lifespan(app: FastAPI):
         search=search_gw,
         ingest_semaphore=asyncio.Semaphore(settings.ingest_concurrency),
         ocr_pool=ocr_pool,
+        planner=planner,
     )
     pipeline_context.set_context(ctx)
 
@@ -103,6 +106,7 @@ async def lifespan(app: FastAPI):
         await search_gw.aclose()
         await embedder.aclose()
         await chatter.aclose()
+        await planner.aclose()
         await engine.dispose()
         if ocr_pool is not None:
             ocr_pool.shutdown(wait=False, cancel_futures=True)

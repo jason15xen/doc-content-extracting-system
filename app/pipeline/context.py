@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
+from app.services.query_planner import QueryPlanner
 from app.services.search_index import SearchGateway
 from app.settings import Settings
 
@@ -30,6 +31,8 @@ class PipelineContext:
     # across all in-flight docs so total CPU stays bounded regardless of
     # ingest_concurrency.
     ocr_pool: ProcessPoolExecutor | None = None
+    # Agentic-search planner for /query. None → plain hybrid search.
+    planner: QueryPlanner | None = None
 
 
 _ctx: PipelineContext | None = None

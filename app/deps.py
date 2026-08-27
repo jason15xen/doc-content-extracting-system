@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.pipeline.context import PipelineContext
 from app.services.chat import Chatter
 from app.services.embeddings import Embedder
+from app.services.query_planner import QueryPlanner
 from app.services.search_index import SearchGateway
 from app.settings import Settings
 
@@ -41,3 +42,9 @@ def get_chatter(
     ctx: PipelineContext = Depends(get_pipeline_context),
 ) -> Chatter:
     return ctx.chatter
+
+
+def get_planner(
+    ctx: PipelineContext = Depends(get_pipeline_context),
+) -> QueryPlanner | None:
+    return ctx.planner
