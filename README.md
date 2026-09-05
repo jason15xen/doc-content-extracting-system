@@ -1,32 +1,41 @@
 # RAG Document Ingestion & Search API
 
-A FastAPI service that ingests documents, extracts text, chunks and embeds them via Azure OpenAI, indexes them in Azure AI Search, and serves hybrid RAG search with LLM-generated answers.
+English | [日本語](README.ja.md)
+
+A FastAPI service that ingests documents, extracts text (with OCR for scanned PDF pages), chunks and embeds them via Azure OpenAI, indexes them in Azure AI Search, and serves hybrid RAG search with LLM-generated answers. Multi-part questions are handled by an agentic retrieval layer: an LLM planner splits them into parallel sub-queries under a hard per-request search budget.
 
 ## Architecture
 
 ```
-  Upload          Background pipeline              Search
-  ──────          ───────────────────              ──────
+  Upload          Background pipeline              Query
+  ──────          ───────────────────              ─────
 
-  POST /documents/upload
+  POST /doc
        │
        ▼
   Stream to temp ──► Extract text ──► Chunk (tiktoken) ──► Embed (Azure OpenAI)
-  + SHA-256 hash     (12 formats)     800 tok / 100 overlap  text-embedding-3-small
-       │                                                        │
+  + SHA-256 hash     (12 formats,     800 tok / 100 overlap  text-embedding-3-small
+       │              OCR fallback)                             │
        ▼                                                        ▼
   SQLite (./db/rag.db)                                    Azure AI Search
-  (documents, tasks, datasets)                            (hybrid: vector + BM25)
+  (documents, tasks, task_files,                          (hybrid: vector + BM25
+   datasets)                                               + semantic reranker)
+                                                                ▲
+                                                     POST /query│ 1-5 searches
                                                                 │
-                                                    POST /search│
-                                                                ▼
-                                                          Top-5 docs by score
+                                        LLM planner ── single-intent → 1 hybrid search
+                                             │
+                                             └─ multi-intent → 3 parallel sub-queries
+                                                              → judge → ≤2 follow-ups
                                                                 │
                                                                 ▼
-                                                          Chat model (Azure OpenAI)
+                                                     Top-5 docs, top-12 chunks
                                                                 │
                                                                 ▼
-                                                          { answer, sources }
+                                                     Chat model (Azure OpenAI)
+                                                                │
+                                                                ▼
+                                                     { answer, files, token_usage }
 ```
 
 ## Supported document types
@@ -36,6 +45,8 @@ A FastAPI service that ingests documents, extracts text, chunks and embeds them 
 | OpenXML | `.docx`, `.xlsx`, `.pptx`, `.docm`, `.xlsm`, `.pptm` |
 | Legacy binary | `.doc`, `.xls`, `.ppt` (via LibreOffice) |
 | Other | `.pdf`, `.txt`, `.md` |
+
+Scanned PDF pages are detected and OCR'd with Tesseract in a bounded process pool (`OCR_ENABLED`, see Configuration). With `OCR_REJECT_SCANNED=true` the detector instead rejects any document containing a scanned page — useful for a fast text-only first pass.
 
 ## Quick start
 
@@ -86,20 +97,25 @@ Open Swagger UI at `http://localhost:8889/docs`.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/documents/upload` | Upload files (multipart). Optional `dataset_id` form field. Returns 202 with per-file status + task IDs. |
-| `GET` | `/documents` | List documents. Query params: `limit`, `offset`, `dataset_id`, `status_filter`. |
-| `DELETE` | `/documents` | Delete specific documents. Body: `{"doc_ids": ["uuid", ...]}`. Deletes from DB + Azure AI Search. Returns 202 + task_id. |
-| `DELETE` | `/documents/all` | Delete all documents from DB + Azure AI Search. Returns 202 + task_id. |
+| `POST` | `/doc` | Upload files (multipart) with an `items` JSON form field carrying client-supplied document IDs. Optional `dataset` and `description` form fields. Returns 202 with a batch `task_id` + `status_url`. |
+| `GET` | `/doc` | List documents. Query params: `limit`, `offset`, `dataset`. |
+| `DELETE` | `/doc` | Delete specific documents. Body: `{"doc_ids": [...]}`. Deletes from DB + Azure AI Search. Returns 202 + task_id. |
+| `DELETE` | `/doc/all` | Delete all documents from DB + Azure AI Search. Returns 202 + task_id. |
 
-#### Upload response example
+Per-file upload outcomes (sample-api semantics): unchanged re-uploads (same ID, filename, and content) are **skipped**; re-uploads of an existing ID with new content are **updated** in place, keeping document metadata; unsupported types, oversize files, and save/commit errors are reported in `failed_files` with a reason. A batch that conflicts with an active task on the same documents is rejected with **409**.
+
+#### Upload response (202)
 
 ```json
 {
-  "items": [
-    {"filename": "report.pdf", "status": "accepted", "document_id": "uuid", "task_id": "uuid"},
-    {"filename": "bad.zip", "status": "failed", "reason": "unsupported_extension:.zip"},
-    {"filename": "copy.pdf", "status": "failed", "reason": "duplicate"}
-  ]
+  "task_id": "uuid",
+  "message": "2 files accepted, 1 skipped",
+  "status_url": "/doc/status/uuid",
+  "total_files": 3,
+  "skipped_files": [{"filename": "same.pdf", "docId": "doc-1", "reason": "unchanged (same ID, filename, and content)"}],
+  "failed_files": [],
+  "updated_files": ["changed.pdf"],
+  "dataset": null
 }
 ```
 
@@ -107,47 +123,12 @@ Open Swagger UI at `http://localhost:8889/docs`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/tasks` | List all tasks. Query params: `limit`, `offset`, `status`, `document_id`, `task_type`. |
-| `GET` | `/tasks/{task_id}` | Get single task with progress and result. |
-| `DELETE` | `/tasks/{task_id}` | Delete a single task record. |
-| `DELETE` | `/tasks` | Delete all task records. |
+| `GET` | `/doc/status/{task_id}` | Batch task status with per-file progress (`files[]`: status, current_step, actionType, reason/error). |
+| `GET` | `/doc/tasks` | List tasks. Query params: `status_filter`, `limit`. |
+| `POST` | `/doc/tasks/{task_id}/cancel` | Cancel a queued/running task. |
+| `DELETE` | `/doc/tasks` | Clear finished task records. |
 
-#### Task response example
-
-```json
-{
-  "id": "661a70e4-...",
-  "document_id": "44b0ba9f-...",
-  "task_type": "ingest",
-  "status": "running",
-  "stage": "embedded",
-  "error_message": null,
-  "progress": 75,
-  "result": "processing (embedded)",
-  "created_at": "2026-04-20T02:27:25Z",
-  "updated_at": "2026-04-20T02:27:28Z"
-}
-```
-
-Progress mapping:
-
-| Stage | Progress |
-|---|---|
-| `uploaded` | 0% |
-| `extracted` | 25% |
-| `chunked` | 50% |
-| `embedded` | 75% |
-| `indexed` | 100% |
-
-On failure, `result` contains the stage and error:
-```json
-{
-  "status": "failed",
-  "stage": "embedded",
-  "progress": 75,
-  "result": "failed at stage 'embedded': EmbeddingError: connection refused"
-}
-```
+A task is one **batch** (upload or delete), with counters (`total_files`, `processed_files`, `failed_file_count`, `skipped_file_count`) and a `files[]` array tracking each file through the pipeline steps. The task completes when the batch finishes; individual file failures are listed in `failed_files` without failing the whole task.
 
 ### Datasets
 
@@ -155,46 +136,62 @@ On failure, `result` contains the stage and error:
 |---|---|---|
 | `POST` | `/datasets` | Create dataset. Body: `{"name": "...", "description": "..."}`. |
 | `GET` | `/datasets` | List all datasets. |
-| `PATCH` | `/datasets/{id}` | Update name/description. |
-| `DELETE` | `/datasets/{id}` | Cascade delete: removes dataset + all its documents + AI Search chunks. Returns 202 + task_id. |
+| `GET` | `/datasets/{id}` | Get one dataset. |
+| `GET` | `/datasets/{id}/documents` | List documents in the dataset. |
+| `PUT` | `/datasets/{id}` | Update name/description (form fields). |
+| `DELETE` | `/datasets/{id}` | Cascade delete: removes dataset + all its documents + AI Search chunks. Returns 202 + task_id. Guarded by the 409 active-task lock; the default dataset is protected. |
 
-### Search
+### Query (RAG search)
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/search` | Hybrid RAG search with LLM answer. |
+| `POST` | `/query` | Agentic hybrid RAG search with LLM answer. |
 
 #### Request
 
 ```json
 {
-  "query": "What is the annual revenue?",
-  "dataset_id": "uuid (optional -- omit to search all)",
-  "top_k": 5
+  "query": "Compare the seismic design requirements for structures and for mechanical components.",
+  "dataset": "uuid (optional -- omit to search all datasets)",
+  "use_cache": true
 }
 ```
-
-- **`dataset_id` omitted** -- searches all documents across all datasets.
-- **`dataset_id` given** -- searches only documents in that dataset.
 
 #### Response
 
 ```json
 {
-  "answer": "The annual revenue was $12M according to [report.pdf#3].",
-  "sources": [
+  "query": "…",
+  "answer": "… cited inline as [doc_name#chunk_index] …",
+  "from_cache": false,
+  "files": [
     {
-      "doc_id": "uuid",
-      "doc_name": "report.pdf",
-      "score": 1.7,
-      "snippet": "Revenue grew 12% year over year...",
-      "chunk_indexes": [2, 3, 5]
+      "id": "doc-uuid",
+      "name": "report.pdf",
+      "relevance_score": 100.0,
+      "dataset_id": "uuid",
+      "dataset_name": "contracts"
     }
-  ]
+  ],
+  "dataset": null,
+  "token_usage": {"prompt_tokens": 9676, "completion_tokens": 663, "total_tokens": 10339}
 }
 ```
 
-Sources are the top-5 documents ranked by cumulative score (sum of per-chunk scores across all matching chunks in that document).
+`relevance_score` is a 0-100 percentage normalized against the best-matching document in this result set (top document is always 100). `token_usage` covers the whole request: query planning + judging + answer generation.
+
+#### Agentic retrieval
+
+Each query is first classified by an LLM planner ([app/services/query_planner.py](app/services/query_planner.py)):
+
+- **Single-intent** (most factual questions): exactly **1** hybrid search — the classic path, no extra index load.
+- **Multi-intent** (comparisons, multi-part questions): the planner writes **3** focused sub-queries which run in parallel; a judge call then either accepts the results or requests up to **2** follow-up searches. Hard cap: **5 index searches per request**, enforced in code regardless of model output ([app/services/retrieval.py](app/services/retrieval.py)).
+
+Rows from all searches are deduped by chunk ID (best score wins) before the document ranking below. The agentic layer degrades instead of failing: planner error or timeout → single classic search; judge error → answer from round 1; one sub-query failing → the others are still used; all follow-ups failing → answer from round-1 results. Every request logs its plan: `N search(es), single_intent=…, subqueries=…, followups=…`.
+
+After retrieval: chunks are grouped by document, each document scored by its best chunk, the top `SEARCH_TOP_K_DOCS` documents kept, and their top `CHAT_MAX_CONTEXT_CHUNKS` chunks (by score) sent to the chat model with instructions to answer only from the sources.
+
+Query embedding runs on a priority lane: it never queues behind bulk-ingest embedding batches and fails fast (503) under heavy Azure throttling instead of hanging.
 
 ### Text extraction (legacy)
 
@@ -208,66 +205,42 @@ Sources are the top-5 documents ranked by cumulative score (sum of per-chunk sco
 |---|---|---|
 | `POST` | `/admin/cleanup/orphan-files` | Delete files on disk with no matching DB record. |
 | `POST` | `/admin/cleanup/orphan-index` | Delete AI Search chunks whose document no longer exists in DB. |
+| `GET` | `/admin/logs` | List application log files. |
+| `GET` | `/admin/logs/{filename}` | Download one log file. |
 
 ## Ingestion pipeline
 
-When a document is uploaded, a background task runs this pipeline:
+When a batch is uploaded, a background task runs this pipeline per file:
 
-1. **Upload** -- file streamed to an OS temp file (allocated via `tempfile.mkstemp`); source bytes are never written under `storage/uploads/`. SHA-256 computed during the stream; duplicates rejected.
-2. **Extract** -- text extracted using the appropriate extractor (docx, pdf, etc.).
+1. **Upload** -- file streamed to an OS temp file (via `tempfile.mkstemp`); source bytes are never written under `storage/uploads/`. SHA-256 computed during the stream.
+2. **Extract** -- text extracted using the appropriate extractor (docx, pdf, etc.). Scanned PDF pages are detected and OCR'd (Tesseract process pool) unless OCR is disabled.
 3. **Chunk** -- text split into 800-token chunks with 100-token overlap (tiktoken `cl100k_base`).
-4. **Embed** -- each chunk embedded via Azure OpenAI `text-embedding-3-small` (1536 dims, batched 16 at a time).
-5. **Index** -- chunks pushed to Azure AI Search with vector + metadata.
+4. **Embed** -- chunks embedded via Azure OpenAI (1536 dims, batched, bounded by `EMBED_MAX_INFLIGHT_BATCHES`).
+5. **Index** -- chunks pushed to Azure AI Search with vector + metadata (bounded by `SEARCH_MAX_INFLIGHT_UPLOADS`).
 6. **Cleanup** -- temp file is always unlinked, whether the pipeline succeeded or failed for that document.
 
-**Batch ordering** -- when a single upload contains many files, the batch is processed largest-first (LPT scheduling). The biggest doc starts at `t=0` alongside the rest of the workers instead of running as a serial tail at the end of the queue.
+**Batch ordering** -- within one upload, files are processed largest-first (LPT scheduling), so the biggest document starts at `t=0` instead of running as a serial tail.
 
-**Task vs. document status** -- an ingest task is marked `success` when the batch runs to completion, even if some documents inside it failed. Per-document failures remain visible as `status=failed` rows in `GET /documents`; the task status reflects "did the batch complete", not "did every doc succeed". The "N ok, K failed" summary is logged at INFO level for each finished task.
-
-Each stage is tracked in the `tasks` table. `GET /tasks/{id}` returns the current progress for a programmatic client.
+**Task vs. file status** -- the batch task is marked completed when the batch runs to completion; per-file failures stay visible in the task's `failed_files` and in `GET /doc`.
 
 ## Database schema
 
-### datasets
-| Column | Type |
-|---|---|
-| id | UUID PK |
-| name | TEXT UNIQUE |
-| description | TEXT |
-| created_at | DATETIME (UTC) |
-| updated_at | DATETIME (UTC) |
+SQLite via SQLAlchemy + Alembic ([app/db/models.py](app/db/models.py)).
 
-### documents
-| Column | Type |
-|---|---|
-| id | UUID PK |
-| name | TEXT (original filename) |
-| hash | CHAR(64) UNIQUE (SHA-256) |
-| dataset_id | UUID FK (nullable) |
-| uploaded_at | DATETIME (UTC) |
-| status | pending / processing / success / failed |
-| storage_path | TEXT (temp file path while in-flight; null after processing — success or failure) |
-| chunk_count | INTEGER |
-
-### tasks
-| Column | Type |
-|---|---|
-| id | UUID PK |
-| document_id | UUID FK (nullable) |
-| task_type | ingest / delete / dataset_cascade |
-| status | queued / running / success / failed |
-| stage | uploaded / extracted / chunked / embedded / indexed / deleted |
-| error_message | TEXT |
-| created_at | DATETIME (UTC) |
-| updated_at | DATETIME (UTC) |
+| Table | Purpose | Key columns |
+|---|---|---|
+| `datasets` | Grouping | `id` (UUID), `name` (unique), `description`, timestamps |
+| `documents` | One row per document | `id` (TEXT, client-supplied), `name`, `hash` (SHA-256), `description`, `dataset_id` FK, `status`, `storage_path`, `file_size`, `chunk_count`, timestamps |
+| `tasks` | One row per batch (upload/delete) | `id` (UUID), `action`, `status`, file counters, `current_file`, `current_step`, `error_message`, timing columns |
+| `task_files` | Per-file progress within a batch | `task_id` FK, `filename`, `doc_id`, `status`, `current_step`, `action_type`, `reason`, `error`, `error_details` |
 
 ## Azure AI Search index
 
 Single index (`rag-documents` by default), push model. The schema is defined in code at [app/services/search_index.py](app/services/search_index.py) (`build_index()`); the app creates or updates it on startup when `ENSURE_INDEX_ON_STARTUP=true`. To get a JSON dump for manual PUT, run `python -m scripts.export_index_schema`.
 
-Key fields: `id` (chunk key: `{doc_id}_{chunk_idx}`), `doc_id`, `doc_name`, `dataset_id` (filterable), `content` (searchable, BM25), `content_vector` (1536-dim HNSW cosine), `uploaded_at`.
+Key fields: `id` (chunk key: `{doc_id}_{chunk_idx}`), `doc_id`, `doc_name`, `dataset_id` (filterable), `content` (searchable, BM25), `content_vector` (1536-dim HNSW cosine, hidden), `uploaded_at`.
 
-Search uses hybrid mode: vector similarity + BM25 keyword matching + optional semantic reranking (requires Standard S1+ tier).
+Each search is hybrid: vector similarity + BM25 keyword matching, fused with RRF, plus optional semantic reranking (requires Standard S1+ tier). The agentic layer issues 1-5 such searches per `/query` request.
 
 ## Configuration
 
@@ -278,10 +251,20 @@ All settings are in `.env` / `.env.dev`, read by [app/settings.py](app/settings.
 | `CHUNK_TOKENS` | 800 | Tokens per chunk |
 | `CHUNK_OVERLAP` | 100 | Overlap between chunks |
 | `EMBED_BATCH_SIZE` | 16 | Chunks per embedding API call |
-| `SEARCH_TOP_K_CHUNKS` | 30 | Chunks retrieved from AI Search per query |
+| `SEARCH_TOP_K_CHUNKS` | 30 | Chunks retrieved per classic (single-intent) search |
 | `SEARCH_TOP_K_DOCS` | 5 | Distinct documents returned in response |
 | `CHAT_MAX_CONTEXT_CHUNKS` | 12 | Max chunks passed to the chat model |
+| `AGENTIC_SEARCH_ENABLED` | true | LLM query planner on `/query` (false = classic single search) |
+| `AGENTIC_MAX_SUBQUERIES` | 3 | Parallel sub-queries for a multi-intent question |
+| `AGENTIC_MAX_SEARCHES` | 5 | Hard cap on index searches per request (sub-queries + follow-ups) |
+| `AGENTIC_SUBQUERY_TOP_K` | 15 | Chunks retrieved per sub-query (0 = `SEARCH_TOP_K_CHUNKS`) |
+| `AGENTIC_LLM_TIMEOUT_S` | 20 | Planner/judge call timeout; on timeout the query degrades to a classic search |
 | `INGEST_CONCURRENCY` | 2 | Max parallel background ingest tasks |
+| `EMBED_MAX_INFLIGHT_BATCHES` | 4 | Cap on concurrent embedding batches (Azure TPM guard) |
+| `SEARCH_MAX_INFLIGHT_UPLOADS` | 4 | Cap on concurrent index upload batches |
+| `OCR_ENABLED` | true | OCR scanned PDF pages (Tesseract) |
+| `OCR_WORKERS` | 6 | OCR process pool size |
+| `OCR_REJECT_SCANNED` | false | Reject docs containing scanned pages instead of OCR-ing |
 | `ENABLE_SEMANTIC_RANKING` | true | Use semantic reranker (needs Standard S1+) |
 | `ENSURE_INDEX_ON_STARTUP` | true | Create/update AI Search index on boot |
 
@@ -293,24 +276,29 @@ app/
   settings.py                  pydantic-settings (reads .env / .env.dev)
   errors.py                    Exception classes
   deps.py                      FastAPI dependency injection providers
-  extraction/                  Document text extraction (moved from original project)
+  extraction/                  Document text extraction
     config.py                  Supported extensions, upload limit
     dispatcher.py              Extension -> Extractor routing
+    scan_detect.py             Scanned-page detection for PDFs
+    ocr.py                     Tesseract OCR (process pool)
     schemas.py                 ExtractionResponse model
     extractors/                One module per file type
     services/libreoffice.py    soffice subprocess wrapper
   db/
     base.py                    SQLAlchemy DeclarativeBase
     session.py                 Async engine + session factory
-    models.py                  Document, Task, Dataset ORM models
+    models.py                  Document, Task, TaskFile, Dataset ORM models
   repositories/                Data access layer (documents, tasks, datasets)
   schemas/                     Pydantic request/response models
   services/
     hashing.py                 Streaming SHA-256 + size-capped save
     chunker.py                 tiktoken-based text splitter
-    embeddings.py              Azure OpenAI embedding client
+    embeddings.py              Azure OpenAI embedding client (priority query lane)
     chat.py                    Azure OpenAI chat client (RAG answer)
+    query_planner.py           Agentic-search LLM planner + judge (JSON mode)
+    retrieval.py               Agentic retrieval orchestration (fan-out, dedupe, search budget)
     search_index.py            Azure AI Search gateway (index schema, upsert, delete, search)
+    logging_setup.py           Rotating file logging under storage/logs/
     storage.py                 Local file path helpers
   pipeline/
     context.py                 Runtime context for background tasks
@@ -320,14 +308,15 @@ app/
     health.py                  GET /health, GET /supported
     extract.py                 POST /extract (legacy sync extraction)
     datasets.py                Dataset CRUD + cascade delete
-    documents.py               Upload, list, delete documents
-    tasks.py                   Task monitoring + cleanup
-    search.py                  POST /search (hybrid RAG)
-    admin.py                   Orphan file/index cleanup
+    documents.py               POST/GET/DELETE /doc (upload, list, delete)
+    tasks.py                   GET /doc/status/{id}, /doc/tasks, cancel, clear
+    query.py                   POST /query (agentic hybrid RAG)
+    admin.py                   Orphan cleanup + log access
 migrations/                    Alembic (auto-run on boot via entrypoint)
 scripts/
   entrypoint.sh                alembic upgrade head + uvicorn
   export_index_schema.py       Dump build_index() output as JSON (for manual PUT)
+  diagnose_pdf.py              PDF extraction/scan-detection debugging helper
 docker-compose.yml             API (SQLite at ./db/rag.db, no external DB service)
 Dockerfile
 ```
@@ -339,7 +328,12 @@ pip install -r requirements-dev.txt   # includes runtime deps + pytest + fixture
 python -m pytest tests/ -v
 ```
 
-- `test_extract.py` -- legacy extraction endpoint (all 12 formats + multi-column PDF)
-- `test_chunker.py` -- token-based chunking edge cases
+- `test_extract.py` -- extraction endpoint (all 12 formats + multi-column PDF)
+- `test_chunker.py`, `test_chunk_key.py` -- token-based chunking + chunk key edge cases
 - `test_hashing.py` -- streaming SHA-256 + oversize abort
-- `test_search_aggregation.py` -- top-5 doc collapse by score-sum, empty results handling
+- `test_upload_api.py`, `test_ingest_skip.py` -- upload semantics (skip/update/failed, 409 lock)
+- `test_embed_query.py` -- priority embedding lane (semaphore bypass, fail-fast retry)
+- `test_search_index.py` -- index schema and gateway behavior
+- `test_search_aggregation.py` -- top-K doc collapse + relevance normalization in `/query`
+- `test_agentic_search.py` -- agentic retrieval: search budget (1/3/5), dedupe, prompt parsing, degradation paths
+- `test_log_filter.py` -- access-log poll filtering
